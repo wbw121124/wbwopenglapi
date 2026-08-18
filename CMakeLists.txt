@@ -5,6 +5,8 @@ project(wbwopenglapi LANGUAGES C CXX)
 #   ON  -> FreeType 矢量字体（Linux 必需；Windows 可选，需 third_party/freetype）
 #   OFF -> Windows 使用系统 GDI 矢量字体（Linux 下配置为 ON 是强制的）
 option(WBWOPENGAL_API_FONT_FREETYPE "使用 FreeType 字体后端" OFF)
+# 可选: 在 FreeType 后端基础上启用 HarfBuzz 整形（连体/OpenType 特性，需 third_party/harfbuzz）
+option(WBWOPENGAL_API_FONT_HARFBUZZ "使用 HarfBuzz 文本整形" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,10 +47,24 @@ if(WBWOPENGAL_API_FONT_FREETYPE)
         set(WBWOPENGAL_FREETYPE_INCLUDE ${WBWOPENGAL_ROOT}/third_party/freetype/include)
         set(WBWOPENGAL_FREETYPE_DLL ${WBWOPENGAL_ROOT}/third_party/freetype/bin/freetype.dll)
         set(WBWOPENGAL_FREETYPE_TARGET freetype)
+        if(WBWOPENGAL_API_FONT_HARFBUZZ)
+            list(APPEND WBWOPENGAL_FONT_DEFINES WBWOPENGAL_API_FONT_HARFBUZZ)
+            add_library(harfbuzz UNKNOWN IMPORTED)
+            set_target_properties(harfbuzz PROPERTIES
+                IMPORTED_LOCATION ${WBWOPENGAL_ROOT}/third_party/harfbuzz/bin/libharfbuzz-0.dll)
+            set(WBWOPENGAL_HARFBUZZ_INCLUDE ${WBWOPENGAL_ROOT}/third_party/harfbuzz/include)
+            set(WBWOPENGAL_HARFBUZZ_DLL ${WBWOPENGAL_ROOT}/third_party/harfbuzz/bin/libharfbuzz-0.dll)
+            set(WBWOPENGAL_HARFBUZZ_TARGET harfbuzz)
+        endif()
     else()
         find_package(Freetype REQUIRED)
         set(WBWOPENGAL_FREETYPE_INCLUDE ${FREETYPE_INCLUDE_DIRS})
         list(APPEND WBWOPENGAL_FONT_LIBS ${FREETYPE_LIBRARIES})
+        if(WBWOPENGAL_API_FONT_HARFBUZZ)
+            find_package(PkgConfig REQUIRED)
+            pkg_check_modules(HARFBUZZ REQUIRED harfbuzz)
+            list(APPEND WBWOPENGAL_FONT_DEFINES WBWOPENGAL_API_FONT_HARFBUZZ)
+        endif()
     endif()
 elseif(WIN32)
     # Windows 默认 GDI 后端, 需要链接 gdi32
@@ -65,8 +81,10 @@ foreach(src ${WBWOPENGAL_EXAMPLES})
     target_include_directories(${name} PRIVATE
         ${WBWOPENGAL_ROOT}/include
         ${WBWOPENGAL_GLFW_INCLUDE}
-        ${WBWOPENGAL_FREETYPE_INCLUDE})
-    target_link_libraries(${name} PRIVATE glad ${WBWOPENGAL_GLFW_TARGET} ${WBWOPENGAL_FONT_LIBS})
+        ${WBWOPENGAL_FREETYPE_INCLUDE}
+        ${WBWOPENGAL_HARFBUZZ_INCLUDE})
+    target_link_libraries(${name} PRIVATE glad ${WBWOPENGAL_GLFW_TARGET}
+        ${WBWOPENGAL_HARFBUZZ_TARGET} ${WBWOPENGAL_FONT_LIBS})
     target_compile_definitions(${name} PRIVATE ${WBWOPENGAL_FONT_DEFINES})
     if(WIN32)
         add_custom_command(TARGET ${name} POST_BUILD
@@ -76,6 +94,11 @@ foreach(src ${WBWOPENGAL_EXAMPLES})
             add_custom_command(TARGET ${name} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     ${WBWOPENGAL_FREETYPE_DLL} $<TARGET_FILE_DIR:${name}>)
+            if(WBWOPENGAL_API_FONT_HARFBUZZ)
+                add_custom_command(TARGET ${name} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        ${WBWOPENGAL_HARFBUZZ_DLL} $<TARGET_FILE_DIR:${name}>)
+            endif()
         endif()
     endif()
 endforeach()

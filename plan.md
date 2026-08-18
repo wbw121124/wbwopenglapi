@@ -142,6 +142,60 @@
     5. **回归纪律**：全量构建须检查每行 [ok] 与警告；运行测试前确认
        exe 依赖（objdump -p）包含 freetype.dll 再判定后端生效。
   - 待解决：全部阶段完成。
+- [x] 阶段 9 连体与 OpenType 特性：HarfBuzz 集成（2026-08-18）
+  - 阶段目标：fillText 支持连体字与 font-feature-settings 风格特性（liga/calt/
+    cvNN/ssNN/zero 等）：fontFeatures(css) / fontFeatures(initializer_list) /
+    resetFontFeatures()；默认全关（不调 fontFeatures 时输出与改造前像素级一致）；
+    HarfBuzz 为可选依赖（WBWOPENGAL_API_FONT_HARFBUZZ 宏，GDI 后端无连体）。
+  - 完成情况：全部达成。10_ligature 在 FreeType+HarfBuzz 配置 7/7 断言通过
+    （calt 连体、cv02、zero、多行），三配置（gdi/freetype/freetype+harfbuzz）
+    全量回归 9 示例 × 3 = 27 次全部退出码 0。09_text_lines 在 FT+HB 下
+    7/7 通过（默认特性空 -> 逐码点回退路径 -> 输出与 FT 后端像素一致）。
+  - 上下文变更（排障记录，重要）：
+    1. **Fira Code 连体机制**：6.2 版 GSUB 无 liga 特性（FeatureList 实测），
+       连体全部在 calt（~100 个 lookup，type 6 chained contextual + type 1
+       混合）。"->" 连体 = hyphen_start.seq + greater_hyphen_end.seq 两个
+       **部件字形**（advance 与两独立字符完全相同，宽度不变，靠轮廓替换
+       实现视觉连体）。calt 是 OpenType **默认特性**：harfbuzz 无显式
+       features 时也会应用 -> 这正是"默认全关"决策的意义（不调 fontFeatures
+       则库不走 shape，逐码点，严格向后兼容）。
+    2. **fontTools ChainSubRule.Input 语义**：Input 数组从**第二个** input
+       glyph 开始（第一个在 Coverage 表），Input=[] 表示 inputCount=1
+       （仅 coverage glyph），**是标准结构**，不是"空 input 规则"。
+       （曾误判为空 input chain context 导致 harfbuzz 不处理，实为误读。）
+    3. **harfbuzz 无 features 也会应用 calt**：hb-shape（msys2 14.3.1）与
+       自编译 14.3.1、uharfbuzz wheel 三者行为一致：默认输出连体部件
+       glyph（hyphen_start.seq=1186 等）；显式 calt=0 时才是普通 hyphen/
+       greater（1221/1580）。calt=1 与默认等价。
+    4. **Fira Code cv02 = 单层 g**（g->g.cv02，SingleSubst lookup 362），
+       不是箭头变体；测试须用 "g" 字符。（首版用 "->" 测 cv02 无效。）
+    5. **Fira Code 默认 '0' 是双孔方孔零**：外框 + 上孔 + 下孔（3 contour，
+       孔为 45 度菱形），中心点恰在孔边界上 -> 取样须取孔几何中心
+       (300+21, 基线-19) 而非 advance 中心。zero 特性把 zero->zero.zero
+       （glyph 1005->1015，斜杠穿过中心）。
+    6. **HarfBuzz 自编译（Windows/MinGW）**：官方 win64 预编译包为 MSYS2
+       构建（无头文件、glib/cairo/png 依赖链深），弃用。改 pip install
+       meson ninja（装到 %APPDATA%\Python\Python313\Scripts，不在 PATH）
+       + ghfast.top 下载 harfbuzz-14.3.1.tar.xz + Python tarfile r:xz
+       解压（Windows bsdtar 无 xz 过滤器）。**meson 需要真实 pkg-config
+       二进制**：自写 pkg-config.py + pkg-config.cmd 模拟器（%TEMP%\
+       wbwopenglapi_deps\），${var} 引用须多轮迭代展开；freetype2.pc 路径
+       必须 D:/wbwopenglapi（项目在 D 盘）；Version 26.1.20 满足 hb
+       >=20.0.14 要求（libtool 版本语义）。meson setup 须 --wipe 才能
+       刷新 .pc 变化。配置 -Dglib/-Dgobject/-Dicu/-Dcairo/-Dgraphite2/
+       -Dfontations/-Dwasm/-Dutilities/-Dtests/-Dbenchmark/-Ddocs/
+       -Dintrospection=disabled + -Dfreetype=enabled + -Ddefault_library=
+       shared；编译 120/120；产物仅依赖 libgcc_s_seh-1.dll + KERNEL32.dll
+       + msvcrt.dll + freetype.dll。
+    7. **MinGW DLL 链接命名坑**：exe 对 DLL 的依赖名取自 PE 导出表内
+       DLL name（libharfbuzz-0.dll），重命名为 harfbuzz.dll 后 exe 仍
+       依赖 libharfbuzz-0.dll（0xC0000135）-> 必须保留原名。
+    8. **build.ps1 必须用 pwsh 跑**：PowerShell 5.1 按 ANSI 解码无 BOM
+       UTF-8 源码 -> 解析错误；bash 工具的 pwsh 7 正常。控制台中文乱码
+       属 GBK 显示问题，不影响。
+    9. **Fira Code 6.2 下载**：GitHub API latest tag=6.2，zip 内 ttf/
+       FiraCode-Regular.ttf（289624 字节）-> third_party/fonts/。
+  - 待解决：无。
 
 ## 项目目标
 

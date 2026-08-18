@@ -3,11 +3,14 @@
 // wbwopenglapi - header-only C++17 库
 // 目标: 让 C++ 的 OpenGL 编程体验接近 JavaScript Canvas 2D API
 //
-// 依赖: GLFW 3.3+ / GLAD (gl:core=3.3) / (可选) FreeType
+// 依赖: GLFW 3.3+ / GLAD (gl:core=3.3) / (可选) FreeType / (可选) HarfBuzz
 //   字体后端选择:
 //     - 定义宏 WBWOPENGAL_API_FONT_FREETYPE: 使用 FreeType (Linux 必需, Windows 可选)
 //     - 未定义且 _WIN32: 使用系统 GDI 矢量字体 (Windows 默认)
 //     - 未定义且非 Windows: 编译错误
+//   OpenType 特性/连体（fontFeatures + HarfBuzz 整形）:
+//     - 需同时定义 WBWOPENGAL_API_FONT_FREETYPE 与 WBWOPENGAL_API_FONT_HARFBUZZ
+//     - GDI 后端不支持 GSUB 特性（fontFeatures 惰性，仅 FreeType+HarfBuzz 生效）
 //
 // 使用示例:
 //   wbwopenglapi::Window win(800, 600, "Demo");
@@ -28,6 +31,10 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include <freetype/ftoutln.h> // FT_Outline_Decompose（freetype.h 不自动包含）
+#if defined(WBWOPENGAL_API_FONT_HARFBUZZ)
+#include <harfbuzz/hb.h>
+#include <harfbuzz/hb-ft.h>
+#endif
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -411,6 +418,14 @@ struct Glyph {
     double advanceX = 0.0;        // 前进宽度（1/64 像素）
 };
 
+// 整形后的字形放置（HarfBuzz 输出；单位 1/64 像素）
+struct ShapedGlyph {
+    uint32_t index = 0;  // 字形索引（HarfBuzz 路径）；回退路径不用
+    double advanceX = 0.0;
+    double dx = 0.0;     // GPOS 横向偏移
+    double dy = 0.0;     // GPOS 纵向偏移（字形空间 y 向上）
+};
+
 // UTF-8 解码：从 s[i] 处取一个码点，i 前移到下一个字符
 inline uint32_t utf8Next(const std::string& s, size_t& i) {
     const unsigned char c = static_cast<unsigned char>(s[i]);
@@ -460,6 +475,12 @@ public:
 
     // 加载字形轮廓（缺字形返回空 outline）
     Glyph loadGlyph(uint32_t cp) const;
+    // 按字形索引加载（连体等无码点映射的字形；GDI 后端恒返回空）
+    Glyph loadGlyphIndex(uint32_t idx) const;
+    // HarfBuzz 整形（仅 FreeType+HarfBuzz 编译配置；否则返回空）
+    std::vector<ShapedGlyph> shape(
+        const std::string& text,
+        const std::vector<std::pair<std::string, bool>>& feats) const;
 
 private:
     void init(const std::string& file, int sizePx);
@@ -468,6 +489,9 @@ private:
 #ifdef WBWOPENGAL_API_FONT_FREETYPE
     FT_Library lib_ = nullptr;
     FT_Face face_ = nullptr;
+#if defined(WBWOPENGAL_API_FONT_HARFBUZZ)
+    hb_font_t* hbFont_ = nullptr;
+#endif
 #else
     HDC dc_ = nullptr;
     HFONT font_ = nullptr;
@@ -754,6 +778,10 @@ inline void FontFace::init(const std::string& file, int sizePx) {
     }
     ascender_ = static_cast<double>(face_->size->metrics.ascender);
     descender_ = static_cast<double>(face_->size->metrics.descender);
+#if defined(WBWOPENGAL_API_FONT_HARFBUZZ)
+    // hb_ft_font 继承 FT 的缩放（1/64 像素单位），position 与 advanceX 单位一致
+    hbFont_ = hb_ft_font_create_referenced(face_);
+#endif
 #else
     (void)file;
     dc_ = CreateCompatibleDC(nullptr);
@@ -787,6 +815,12 @@ inline void FontFace::init(const std::string& file, int sizePx) {
 
 inline void FontFace::destroy() {
 #ifdef WBWOPENGAL_API_FONT_FREETYPE
+#if defined(WBWOPENGAL_API_FONT_HARFBUZZ)
+    if (hbFont_) {
+        hb_font_destroy(hbFont_);
+        hbFont_ = nullptr;
+    }
+#endif
     if (face_) {
         FT_Done_Face(face_);
         face_ = nullptr;
@@ -852,12 +886,15 @@ struct OutlineToSegs {
 };
 
 inline Glyph FontFace::loadGlyph(uint32_t cp) const {
+    return loadGlyphIndex(FT_Get_Char_Index(face_, cp));
+}
+
+inline Glyph FontFace::loadGlyphIndex(uint32_t idx) const {
     Glyph g;
-    FT_UInt idx = FT_Get_Char_Index(face_, cp);
     if (idx == 0) {
         return g;
     }
-    if (FT_Load_Glyph(face_, idx, FT_LOAD_NO_BITMAP) != 0) {
+    if (FT_Load_Glyph(face_, static_cast<FT_UInt>(idx), FT_LOAD_NO_BITMAP) != 0) {
         return g;
     }
     FT_Outline* ol = &face_->glyph->outline;
@@ -868,6 +905,63 @@ inline Glyph FontFace::loadGlyph(uint32_t cp) const {
     g.advanceX = static_cast<double>(face_->glyph->advance.x);
     return g;
 }
+
+#if defined(WBWOPENGAL_API_FONT_HARFBUZZ)
+
+inline std::vector<ShapedGlyph> FontFace::shape(
+    const std::string& text,
+    const std::vector<std::pair<std::string, bool>>& feats) const {
+    std::vector<ShapedGlyph> out;
+    if (!hbFont_ || text.empty()) {
+        return out;
+    }
+    hb_buffer_t* buf = hb_buffer_create();
+    hb_buffer_add_utf8(buf, text.data(), static_cast<int>(text.size()), 0,
+                       static_cast<int>(text.size()));
+    hb_buffer_guess_segment_properties(buf);
+    std::vector<hb_feature_t> hbFeats;
+    hbFeats.reserve(feats.size());
+    for (const auto& f : feats) {
+        if (f.first.size() != 4) {
+            continue;
+        }
+        hb_feature_t hf = {};
+        hf.tag = HB_TAG(static_cast<unsigned char>(f.first[0]),
+                        static_cast<unsigned char>(f.first[1]),
+                        static_cast<unsigned char>(f.first[2]),
+                        static_cast<unsigned char>(f.first[3]));
+        hf.value = f.second ? 1u : 0u;
+        hf.start = 0;
+        hf.end = static_cast<unsigned int>(-1);
+        hbFeats.push_back(hf);
+    }
+    hb_shape(hbFont_, buf, hbFeats.data(), static_cast<unsigned int>(hbFeats.size()));
+    const unsigned int n = hb_buffer_get_length(buf);
+    out.reserve(n);
+    const hb_glyph_info_t* infos = hb_buffer_get_glyph_infos(buf, nullptr);
+    const hb_glyph_position_t* pos = hb_buffer_get_glyph_positions(buf, nullptr);
+    for (unsigned int k = 0; k < n; ++k) {
+        ShapedGlyph sg;
+        sg.index = infos[k].codepoint;
+        if (pos) {
+            sg.dx = static_cast<double>(pos[k].x_offset);
+            sg.dy = static_cast<double>(pos[k].y_offset);
+            sg.advanceX = static_cast<double>(pos[k].x_advance);
+        }
+        out.push_back(sg);
+    }
+    hb_buffer_destroy(buf);
+    return out;
+}
+
+#else // 无 HarfBuzz: shape 不可用（Canvas 的 shapingActive() 恒为 false）
+
+inline std::vector<ShapedGlyph> FontFace::shape(
+    const std::string&, const std::vector<std::pair<std::string, bool>>&) const {
+    return {};
+}
+
+#endif
 
 #else // GDI 后端
 
@@ -936,6 +1030,14 @@ inline Glyph FontFace::loadGlyph(uint32_t cp) const {
     }
     g.advanceX = static_cast<double>(gm.gmCellIncX) * 64.0;
     return g;
+}
+
+// GDI 后端无字形索引/GSUB 接口（连体与特性不可用）
+inline Glyph FontFace::loadGlyphIndex(uint32_t) const { return {}; }
+
+inline std::vector<ShapedGlyph> FontFace::shape(
+    const std::string&, const std::vector<std::pair<std::string, bool>>&) const {
+    return {};
 }
 
 #endif // WBWOPENGAL_API_FONT_FREETYPE
@@ -1307,8 +1409,9 @@ public:
 
     // ---------------- 文本（矢量轮廓） ----------------
 
-    // 设置字体: "16px sans-serif"（取字号，字体名忽略）或字体文件路径
-    // （FreeType 后端用文件路径或默认字体；GDI 后端始终用系统默认字体）
+// 设置字体: "16px sans-serif"（取字号，字体名忽略）或字体文件路径
+    //   （FreeType 后端用文件路径或默认字体；GDI 后端始终用系统默认字体）
+    //   支持 "NNpx <字体文件路径>" 组合形式
     void font(const std::string& css) {
         std::string s = css;
         size_t b = s.find_first_not_of(" \t\r\n");
@@ -1317,38 +1420,104 @@ public:
             return;
         }
         s = s.substr(b, e - b + 1);
+        auto isPath = [](const std::string& t) {
+            return t.find('/') != std::string::npos ||
+                   t.find('\\') != std::string::npos ||
+                   t.find(".ttf") != std::string::npos ||
+                   t.find(".otf") != std::string::npos ||
+                   t.find(".ttc") != std::string::npos;
+        };
         std::string file;
         int size = 16;
-        if (s.find('/') != std::string::npos || s.find('\\') != std::string::npos ||
-            s.find(".ttf") != std::string::npos || s.find(".otf") != std::string::npos ||
-            s.find(".ttc") != std::string::npos) {
-            file = s;
-        } else {
-            const size_t p = s.find("px");
-            if (p != std::string::npos) {
-                size_t b2 = p;
-                while (b2 > 0) {
-                    const char c = s[b2 - 1];
-                    if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') {
-                        --b2;
-                    } else {
-                        break;
-                    }
-                }
-                if (b2 < p) {
-                    size = static_cast<int>(std::strtod(s.substr(b2, p - b2).c_str(), nullptr));
-                    if (size <= 0) {
-                        size = 16;
-                    }
+        const size_t p = s.find("px");
+        if (p != std::string::npos) {
+            size_t b2 = p;
+            while (b2 > 0) {
+                const char c = s[b2 - 1];
+                if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') {
+                    --b2;
+                } else {
+                    break;
                 }
             }
+            if (b2 < p) {
+                size = static_cast<int>(std::strtod(s.substr(b2, p - b2).c_str(), nullptr));
+                if (size <= 0) {
+                    size = 16;
+                }
+                std::string rest = s.substr(p + 2);
+                size_t rb = rest.find_first_not_of(" \t\r\n");
+                if (rb != std::string::npos && isPath(rest.substr(rb))) {
+                    file = rest.substr(rb);
+                }
+            }
+        }
+        if (file.empty() && isPath(s)) {
+            file = s;
         }
         if (!fontFace_ || fontCss_ != s) {
             fontFace_ = std::make_unique<detail::FontFace>(file, size);
             glyphCache_.clear();
+            glyphIndexCache_.clear();
             fontCss_ = s;
         }
     }
+
+    // ---------------- OpenType 特性 / 连体（FreeType+HarfBuzz 生效） ----------------
+
+    // 设置特性（CSS font-feature-settings 风格，整体替换）:
+    //   fontFeatures("\"cv02\", \"zero\"") / fontFeatures("cv02, zero, ss01 0")
+    // 空列表 = 全部关闭（默认；此时走逐码点渲染，与无 HarfBuzz 行为一致）
+    void fontFeatures(const std::string& css) {
+        std::vector<std::pair<std::string, bool>> feats;
+        size_t i = 0;
+        while (i <= css.size()) {
+            size_t b = i;
+            while (b < css.size() &&
+                   (css[b] == ' ' || css[b] == '\t' || css[b] == '"' || css[b] == '\'')) {
+                ++b;
+            }
+            size_t segEnd = b;
+            while (segEnd < css.size() && css[segEnd] != ',') {
+                ++segEnd;
+            }
+            size_t t = segEnd;
+            while (t > b && (css[t - 1] == ' ' || css[t - 1] == '\t' ||
+                             css[t - 1] == '"' || css[t - 1] == '\'')) {
+                --t;
+            }
+            std::string seg = css.substr(b, t - b);
+            if (!seg.empty()) {
+                const size_t sp = seg.find_first_of(" \t");
+                const std::string tag = sp == std::string::npos ? seg : seg.substr(0, sp);
+                std::string val;
+                if (sp != std::string::npos) {
+                    const size_t vb = seg.find_first_not_of(" \t", sp);
+                    if (vb != std::string::npos) {
+                        val = seg.substr(vb);
+                    }
+                }
+                bool on = true;
+                if (val == "0" || val == "off" || val == "false") {
+                    on = false;
+                }
+                feats.push_back({tag, on});
+            }
+            if (segEnd >= css.size()) {
+                break;
+            }
+            i = segEnd + 1;
+        }
+        features_ = std::move(feats);
+    }
+
+    // 程序化设置特性（整体替换）
+    void fontFeatures(std::initializer_list<std::pair<std::string, bool>> feats) {
+        features_.assign(feats.begin(), feats.end());
+    }
+
+    // 恢复默认（全部特性关闭）
+    void resetFontFeatures() { features_.clear(); }
 
     void textAlign(TextAlign a) { textAlign_ = a; }
     void textBaseline(TextBaseline b) { textBaseline_ = b; }
@@ -1363,6 +1532,13 @@ public:
 
     // 文本宽度（像素）
     double measureText(const std::string& text) const {
+        if (shapingActive() && fontFace_) {
+            double total = 0.0;
+            for (const auto& sg : fontFace_->shape(text, features_)) {
+                total += sg.advanceX;
+            }
+            return total / 64.0;
+        }
         double total = 0.0;
         size_t i = 0;
         while (i < text.size()) {
@@ -1684,6 +1860,29 @@ void main() {
         return g;
     }
 
+    // 按字形索引加载并缓存（HarfBuzz 整形路径；特性已编码进索引，无需清缓存）
+    detail::Glyph glyphIndex(uint32_t idx) const {
+        auto it = glyphIndexCache_.find(idx);
+        if (it != glyphIndexCache_.end()) {
+            return it->second;
+        }
+        detail::Glyph g;
+        if (fontFace_) {
+            g = fontFace_->loadGlyphIndex(idx);
+        }
+        glyphIndexCache_.emplace(idx, g);
+        return g;
+    }
+
+    // 整形是否生效（FreeType+HarfBuzz 编译配置 且 显式设置了特性）
+    bool shapingActive() const {
+#if defined(WBWOPENGAL_API_FONT_FREETYPE) && defined(WBWOPENGAL_API_FONT_HARFBUZZ)
+        return !features_.empty();
+#else
+        return false;
+#endif
+    }
+
     // 文本对齐偏移（像素）
     double alignOffset(double w) const {
         switch (textAlign_) {
@@ -1718,36 +1917,62 @@ void main() {
         if (!fontFace_) {
             font("");
         }
-        const double total = measureText(text);
+        // 整形路径（FreeType+HarfBuzz 且显式设置了特性；否则回退逐码点）
+        std::vector<detail::ShapedGlyph> shaped;
+        double total = 0.0;
+        if (shapingActive() && fontFace_) {
+            shaped = fontFace_->shape(text, features_);
+            for (const auto& sg : shaped) {
+                total += sg.advanceX;
+            }
+            total /= 64.0;
+        } else {
+            total = measureText(text);
+        }
         double scale = 1.0;
         if (maxWidth > 0.0 && total > maxWidth) {
             scale = maxWidth / total; // Canvas 语义: 超宽压缩
         }
         const double tx = x - alignOffset(total * scale);
         const double ty = y + baselineOffset();
-        double cur = 0.0;
+        // 绘制单个字形（ox/oy 为像素偏移；字形空间 1/64 像素、y 向上）
+        auto drawGlyphAt = [&](const detail::Glyph& g, double ox, double oy) {
+            if (g.outline.empty()) {
+                return;
+            }
+            std::vector<detail::PathSeg> segs;
+            segs.reserve(g.outline.size());
+            for (const detail::PathSeg& s : g.outline) {
+                detail::PathSeg t = s;
+                t.x1 = static_cast<float>(ox + s.x1 * scale / 64.0);
+                t.y1 = static_cast<float>(ty - s.y1 * scale / 64.0 - oy);
+                t.x2 = static_cast<float>(ox + s.x2 * scale / 64.0);
+                t.y2 = static_cast<float>(ty - s.y2 * scale / 64.0 - oy);
+                t.x3 = static_cast<float>(ox + s.x3 * scale / 64.0);
+                t.y3 = static_cast<float>(ty - s.y3 * scale / 64.0 - oy);
+                segs.push_back(t);
+            }
+            if (fill) {
+                fillOutline(segs, fillStyle_);
+            } else {
+                strokeOutline(segs, strokeStyle_);
+            }
+        };
+        if (!shaped.empty()) {
+            double cur = 0.0; // 光标 x 偏移（1/64 像素单位，随 scale 缩放）
+            for (const auto& sg : shaped) {
+                drawGlyphAt(glyphIndex(sg.index),
+                            tx + (cur + sg.dx) * scale / 64.0,
+                            sg.dy * scale / 64.0);
+                cur += sg.advanceX;
+            }
+            return;
+        }
+        double cur = 0.0; // 光标 x 偏移（1/64 像素单位，随 scale 缩放）
         size_t i = 0;
         while (i < text.size()) {
             const detail::Glyph g = glyph(detail::utf8Next(text, i));
-            if (!g.outline.empty()) {
-                std::vector<detail::PathSeg> segs;
-                segs.reserve(g.outline.size());
-                for (const detail::PathSeg& s : g.outline) {
-                    detail::PathSeg t = s;
-                    t.x1 = static_cast<float>(tx + s.x1 * scale / 64.0);
-                    t.y1 = static_cast<float>(ty - s.y1 * scale / 64.0);
-                    t.x2 = static_cast<float>(tx + s.x2 * scale / 64.0);
-                    t.y2 = static_cast<float>(ty - s.y2 * scale / 64.0);
-                    t.x3 = static_cast<float>(tx + s.x3 * scale / 64.0);
-                    t.y3 = static_cast<float>(ty - s.y3 * scale / 64.0);
-                    segs.push_back(t);
-                }
-                if (fill) {
-                    fillOutline(segs, fillStyle_);
-                } else {
-                    strokeOutline(segs, strokeStyle_);
-                }
-            }
+            drawGlyphAt(g, tx + cur * scale / 64.0, 0.0);
             cur += g.advanceX;
         }
     }
@@ -1780,9 +2005,11 @@ void main() {
 
     std::unique_ptr<detail::FontFace> fontFace_;
     mutable std::unordered_map<uint32_t, detail::Glyph> glyphCache_;
+    mutable std::unordered_map<uint32_t, detail::Glyph> glyphIndexCache_;
     TextAlign textAlign_ = TextAlign::Left;
     TextBaseline textBaseline_ = TextBaseline::Alphabetic;
     std::string fontCss_;
+    std::vector<std::pair<std::string, bool>> features_; // 空 = 特性全关（默认）
 };
 
 } // namespace wbwopenglapi

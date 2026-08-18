@@ -33,6 +33,9 @@ int main() {
   （translate / rotate / save / restore）、drawImage
 - **矢量文本双后端**：Windows 默认 GDI（零第三方依赖），可选 FreeType；
   Linux 使用 FreeType。字形轮廓与用户路径共用同一 fill/stroke 管线
+- **OpenType 特性（可选）**：FreeType + HarfBuzz 时支持连体字与
+  `font-feature-settings` 风格特性（liga / calt / cvNN / ssNN / zero 等），
+  fontFeatures() 显式开启，默认全关、输出与无 HarfBuzz 时像素级一致
 - **纯标准库**：CSS 颜色解析、BMP 解码、粗线三角带生成均无第三方依赖
 - **现代 OpenGL**：GL 3.3 core，CPU 端顶点变换 + stencil even-odd 填充，
   无弃用 API
@@ -43,24 +46,29 @@ int main() {
 
 ```
 powershell -ExecutionPolicy Bypass -File scripts/fetch_deps.ps1   # 首次：下载依赖
+powershell -ExecutionPolicy Bypass -File scripts/fetch_deps.ps1 -HarfBuzz   # 可选：HarfBuzz（连体）
 powershell -ExecutionPolicy Bypass -File build.ps1 -Example 08_demo
+powershell -ExecutionPolicy Bypass -File build.ps1 -HarfBuzz -Example 10_ligature
 ```
 
 参数：`-Example`（examples 下的示例名，如 02_shapes / 05_text / 08_demo），
-`-Backend gdi|freetype`（默认 auto：FreeType 优先）。
+`-Backend gdi|freetype`（默认 auto：FreeType 优先），`-HarfBuzz`（在 FreeType
+基础上启用 HarfBuzz 整形；build.ps1 须用 PowerShell 7+ 运行）。
 
 ### Linux（CMake）
 
 ```
-sudo apt install libglfw3-dev libfreetype-dev
-cmake -B build && cmake --build build
+sudo apt install libglfw3-dev libfreetype-dev libharfbuzz-dev
+cmake -B build -DWBWOPENGAL_API_FONT_HARFBUZZ=ON && cmake --build build
 ```
 
 编译时必须定义 `WBWOPENGAL_API_FONT_FREETYPE` 并链接 FreeType（Linux 经
 `find_package(Freetype)`；Windows 由 `scripts/fetch_deps.ps1` 获取
 ubawurinna/freetype-windows-binaries 的预编译 `freetype.dll`，仅依赖
 Universal CRT，MinGW 直接链接该 DLL）。Windows 不定义该宏则自动使用
-系统 GDI 后端（零第三方依赖）。
+系统 GDI 后端（零第三方依赖）。定义 `WBWOPENGAL_API_FONT_HARFBUZZ`
+（Windows 链接 third_party/harfbuzz 自编译的 `libharfbuzz-0.dll`，仅依赖
+freetype.dll；Linux 经 pkg-config harfbuzz）后启用 OpenType 特性。
 
 ## 示例
 
@@ -73,6 +81,8 @@ Universal CRT，MinGW 直接链接该 DLL）。Windows 不定义该宏则自动�
 | 06_transform | 变换矩阵栈：translate / rotate / save / restore |
 | 07_image | loadBMP / drawImage（原尺寸与缩放） |
 | 08_demo | 综合演示：全部 API + 动画 |
+| 09_text_lines | 多行文本混排（中西文 / 对齐 / 基线 / 字体切换） |
+| 10_ligature | OpenType 特性：calt 连体 / cv02 / zero（需 Fira Code + HarfBuzz） |
 
 所有示例支持 `-t` 测试模式：渲染 0.5 秒后逐像素校验，全部通过退出码 0。
 
@@ -100,6 +110,9 @@ class Canvas {                      // 即 "ctx"
     void font(const std::string& css);   // "16px sans-serif" 或字体文件路径
     void textAlign(TextAlign a);
     void textBaseline(TextBaseline b);
+    void fontFeatures(const std::string& css);  // "liga, calt 1, cv02 0"（HarfBuzz 时生效）
+    void fontFeatures(std::initializer_list<std::pair<std::string, bool>> feats);
+    void resetFontFeatures();           // 关闭全部特性（默认状态）
     // 矩形
     void fillRect(x, y, w, h);  void strokeRect(x, y, w, h);
     void clearRect(x, y, w, h);
@@ -136,9 +149,15 @@ HiDPI 自动按 framebuffer 尺寸适配。路径 fill 采用 stencil even-odd
   （规避部分驱动对 GL_FLOAT attribute 大数值与 mat3 uniform 的读取异常）
 - 字形空间统一为 1/64 像素、y 向上、基线 y=0；GDI 输出（像素单位）×64
   与 FreeType（1/64 像素）对齐
+- HarfBuzz 整形（可选宏）：FontFace 持有 hb_font_t（hb_ft_font_create_referenced，
+  继承 FT 的 1/64 像素 scale），shape() 输出 glyph 索引 + 位移/步进；
+  字形缓存键为字形索引（特性已编码进索引）。**默认特性全关**：features 为空时
+  走逐码点路径（与无 HarfBuzz 时像素级一致）；fontFeatures() 显式开启后
+  才调用 hb_shape。GDI 后端无连体（忽略 fontFeatures）
 - glTexImage2D 像素数组首行位于纹理坐标 v=0，drawImage 据此映射
   （画布顶 = v=0）
-- 依赖：GLFW 3.4 + GLAD（gl 3.3 core）+ 可选 FreeType；其余纯标准库
+- 依赖：GLFW 3.4 + GLAD（gl 3.3 core）+ 可选 FreeType + 可选 HarfBuzz；
+  其余纯标准库
 
 ## 目录结构
 
@@ -146,8 +165,10 @@ HiDPI 自动按 framebuffer 尺寸适配。路径 fill 采用 stencil even-odd
 wbwopenglapi/
 ├─ include/wbwopenglapi.hpp   # 唯一头文件：全部 API 实现
 ├─ third_party/               # 依赖（gitignore）
-├─ examples/                  # 01_hello ... 08_demo
-├─ scripts/fetch_deps.ps1     # 下载依赖（Windows）
+│  ├─ fonts/                  # Fira Code（10_ligature 用，fetch_deps 下载）
+│  └─ harfbuzz/               # HarfBuzz 自编译（fetch_deps.ps1 -HarfBuzz）
+├─ examples/                  # 01_hello ... 10_ligature
+├─ scripts/fetch_deps.ps1     # 下载依赖（Windows；-HarfBuzz 自编译 HarfBuzz）
 ├─ build.ps1                  # 一键构建（Windows/MinGW）
 ├─ CMakeLists.txt             # 跨平台构建
 └─ plan.md                    # 开发计划与排障记录
