@@ -305,7 +305,7 @@ inline std::vector<Vec2> buildStrokeStrip(const std::vector<Vec2>& pts, bool clo
         out.push_back(al);
         out.push_back(ar);
         out.push_back(bl);
-        out.push_back(al);
+        out.push_back(ar);
         out.push_back(bl);
         out.push_back(br);
     }
@@ -1876,6 +1876,16 @@ void main() {
         program_->use();
         glUniform4f(program_->uniform("u_color"), c.r, c.g, c.b,
                     c.a * static_cast<float>(globalAlpha_));
+        if (antialias_ == "ssaa" && verts[0].y > 100 && verts[0].y < 400) {
+            // DEBUG-REMOVE
+            std::fprintf(stderr, "[drawSolid-ssaa] v0=(%.2f,%.2f) v2=(%.2f,%.2f) proj=(%.4f,%.4f,%.4f|%.4f,%.4f,%.4f|%.4f,%.4f,%.4f) ndc0=(%.4f,%.4f)\n",
+                         static_cast<double>(verts[0].x), static_cast<double>(verts[0].y),
+                         static_cast<double>(verts[2].x), static_cast<double>(verts[2].y),
+                         static_cast<double>(proj_[0]), static_cast<double>(proj_[1]), static_cast<double>(proj_[2]),
+                         static_cast<double>(proj_[3]), static_cast<double>(proj_[4]), static_cast<double>(proj_[5]),
+                         static_cast<double>(proj_[6]), static_cast<double>(proj_[7]), static_cast<double>(proj_[8]),
+                         static_cast<double>(ndc[0].x), static_cast<double>(ndc[0].y));
+        }
         vao_->bind();
         vbo_->upload(ndc.data(), static_cast<GLsizeiptr>(ndc.size() * sizeof(detail::Vec2)));
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(count));
@@ -2063,9 +2073,11 @@ void main() {
 
     // ---------------- 抗锯齿管线（antialias()） ----------------
 
-    // 帧内首个绘制调用前：切换离屏 FBO（只执行一次/帧）
+    // 帧内首个绘制调用前：切换离屏 FBO（只执行一次/帧）。
+    // off 模式同样经 1x 离屏 FBO，保证 present()/resolve() 后默认
+    // framebuffer 即当前帧内容（读回/合成语义与 AA 模式一致）。
     void ensureFrame() {
-        if (antialias_ == "off" || !aaDirty_) {
+        if (!aaDirty_) {
             return;
         }
         aaDirty_ = false;
@@ -2093,7 +2105,7 @@ void main() {
     // 帧末：按模式把离屏结果 resolve 到默认 framebuffer。
     // 由 Window::swapBuffers() 在交换缓冲前自动调用
     void present() {
-        if (antialias_ == "off" || !aaFbo_) {
+        if (!aaFbo_) {
             aaDirty_ = true;
             return;
         }
@@ -2101,8 +2113,48 @@ void main() {
         const int fh = window_.framebufferHeight();
         aaFbo_->bindRead();
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-        if (antialias_ == "ssaa" || antialias_ == "msaa") {
+        if (antialias_ == "off") {
+            // 1x 离屏 → 默认 framebuffer（1:1 拷贝，保持硬边）
+            glBlitFramebuffer(0, 0, fw, fh, 0, 0, fw, fh,
+                              GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        } else if (antialias_ == "ssaa" || antialias_ == "msaa") {
             // SSAA：2x 缩小采样（GL_LINEAR）；MSAA：多重采样自动 resolve
+            if (antialias_ == "ssaa") {
+                // DEBUG-REMOVE: 全图墨bbox
+                std::vector<unsigned char> dbgBuf(static_cast<size_t>(aaFbo_->width()) *
+                                                  aaFbo_->height() * 4);
+                glReadPixels(0, 0, aaFbo_->width(), aaFbo_->height(), GL_RGBA,
+                             GL_UNSIGNED_BYTE, dbgBuf.data());
+                long ink = 0;
+                int minX = aaFbo_->width(), minY = aaFbo_->height(), maxX = -1, maxY = -1;
+                std::fprintf(stderr, "[present] ssaa FBO竖切 x=400(y904..915) x=180(y896..927):\n");
+                for (int yy = 904; yy <= 915; ++yy) {
+                    std::fprintf(stderr, "  y=%d x400=(%d,%d,%d) ", yy,
+                                 dbgBuf[(yy * 1600 + 400) * 4], dbgBuf[(yy * 1600 + 400) * 4 + 1],
+                                 dbgBuf[(yy * 1600 + 400) * 4 + 2]);
+                    if (yy >= 896 && yy <= 927) {
+                        std::fprintf(stderr, "x180=(%d,%d,%d)",
+                                     dbgBuf[(yy * 1600 + 180) * 4], dbgBuf[(yy * 1600 + 180) * 4 + 1],
+                                     dbgBuf[(yy * 1600 + 180) * 4 + 2]);
+                    }
+                    std::fprintf(stderr, "\n");
+                }
+                for (int y = 0; y < aaFbo_->height(); ++y) {
+                    for (int x = 0; x < aaFbo_->width(); ++x) {
+                        const unsigned char* p =
+                            &dbgBuf[static_cast<size_t>(y * aaFbo_->width() + x) * 4];
+                        if (p[0] != 240 || p[1] != 240 || p[2] != 240) {
+                            ++ink;
+                            if (x < minX) minX = x;
+                            if (x > maxX) maxX = x;
+                            if (y < minY) minY = y;
+                            if (y > maxY) maxY = y;
+                        }
+                    }
+                }
+                std::fprintf(stderr, "[present] ssaa FBO 墨=%ld box=(%d,%d)-(%d,%d)\n",
+                             ink, minX, minY, maxX, maxY);
+            }
             glBlitFramebuffer(0, 0, aaFbo_->width(), aaFbo_->height(), 0, 0, fw, fh,
                               GL_COLOR_BUFFER_BIT, GL_LINEAR);
         } else {
