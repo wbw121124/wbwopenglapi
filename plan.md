@@ -87,6 +87,32 @@
        （字号 ≤0 回退 16px），含 .ttf/.otf/.ttc 或路径分隔符视为文件路径
        （GDI 后端忽略文件名，始终用系统字体）。
   - 待解决：剩余阶段（变换/图像/示例/文档）。
+- [x] 阶段 6 进阶：变换矩阵栈 + drawImage / BMP（2026-08-18）
+  - 阶段目标：translate/rotate（顺时针，后调用先应用）/ save / restore /
+    resetTransform；save/restore 保存变换矩阵 + 全部样式（fillStyle/strokeStyle/
+    lineWidth/globalAlpha/textAlign/textBaseline/font）；loadBMP（纯标准库解码
+    未压缩 24/32 位 BMP，行序统一自上而下）；drawImage（原尺寸或缩放，纹理
+    通道独立 GLSL 程序 + GLTexture RAII + pos/uv 交错 VAO）；drawSolid 集成
+    当前变换（有效矩阵 = proj_ * current_，stencil 全屏 quad 不受变换影响）。
+  - 完成情况：全部达成。06_transform 双后端 6/6、07_image 双后端 9/9 像素
+    校验通过（退出码 0）；02_shapes / 04_path / 05_text 双后端全量回归通过。
+  - 上下文变更（排障记录，重要）：
+    1. **纹理 v 坐标方向**：glTexImage2D 像素数组首行位于纹理坐标 v=0（GL
+       纹素原点左下）。图像行 0（顶行）即数据首行 -> 画布顶对应 v=0，
+       画布底 v=1（初版把顶行映射到 v=1，整幅图上下颠倒）。
+    2. **BMP 行对齐**：24 位 4 像素行 = 12 字节，已 4 字节对齐**无 padding**
+       （rowBytes = ((w*bpp+31)/32)*4 = 12）。测试 BMP 首次生成时错误加了
+       4 字节 padding，导致解析结果整幅错位（首版全 FAIL 根因之一）。
+    3. BMP bottom-up：biHeight > 0 时文件行序自下而上，解析时按
+       srcY = height-1-y 翻转；负 biHeight（top-down）直接顺序读。
+    4. **GDI/FreeType 后端与变换/图像无关**：矩阵栈与纹理通道为纯 CPU/GL
+       逻辑，双后端行为一致，无字体后端差异。
+    5. rotate 矩阵（y 向下坐标系）：[[cos,-sin],[sin,cos]] 在画布上呈
+       顺时针（Canvas 语义）；测试用 45 度旋转正方形的**中心点**校验
+       （旋转不改变中心，稳健）。
+    6. save/restore 的 font 恢复：比较 fontCss_ 字符串，不同则重建
+       FontFace 并清字形缓存。
+  - 待解决：剩余阶段（示例/文档）。
 - [ ] 阶段 4 路径系统：fill(stencil) / stroke(粗线) / arc / 贝塞尔
 - [ ] 阶段 5 矢量文本：GDI / FreeType 双后端
 - [ ] 阶段 6 进阶：变换矩阵栈 + drawImage / BMP
