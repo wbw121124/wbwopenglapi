@@ -9,11 +9,10 @@
 - [x] 修复 saveBmp 的 y 方向颠倒（11 + 12），重新生成 BMP 验证方向
 - [x] 正确方向下量化 default 线宽分布，定位粗细分段
 - [x] 修复矢量描边（buildStrokeStrip/drawSolid/投影）根因：三角形分解改为 {al,ar,bl, ar,bl,br}
-- [ ] 回归 11/12 全绿（09/10 不回归也重跑确认）
-- [ ] 回归 11/12 全绿（09/10 不回归也重跑确认）
-- [ ] 拆除 12 调试块（present/drawSolid DEBUG + 12 cpp m==0 块）
-- [ ] build/ DLL 复制到 test/
-- [ ] 最终全量回归 + commit + push
+- [x] 回归 11/12 全绿（09/10 重编译重跑确认全绿）
+- [x] 拆除 12 调试块（present/drawSolid DEBUG + 12 cpp m==0 块）
+- [x] build/ DLL 复制到 test/
+- [x] 最终全量回归 + commit + push
 
 ## 诊断记录
 - 11_lines.bmp x 列红行分布异常（x=120: 114,164,334,503-506…）→ 发现 BMP 上下颠倒
@@ -28,3 +27,4 @@
   - 12 off 斜线 x=90..350 全部恒定 3 行
   - ssaa FBO 竖切 x=400: y906-912 七行完整（修复前仅 906-909 四行）；proj 复核恒为 0.0025/-0.0033（此前疑云排除）
   - 11/12 exit=0 全绿
+- **收尾**：调试块全部拆除（hpp present/drawSolid DEBUG、12 cpp m==0 块）；全量回归 09/10/11/12 均 exit=0，stderr 零调试输出；5 张 BMP + 11_lines.bmp 正常；build/ 5 个 DLL 复制到 test/

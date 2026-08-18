@@ -141,27 +141,6 @@ int main(int argc, char** argv) {
                     ctx.antialias(modes[m]);
                     drawScene(ctx, "验证");
                     ctx.resolve();
-                    if (m == 0) {
-                        // DEBUG: 打印斜线四边形 strip 顶点 + 终点区域像素
-                        std::fprintf(stderr, "[dbg] strip 顶点:\n");
-                        std::vector<wbwopenglapi::detail::Vec2> dbgPts = {{90, 90}, {350, 220}};
-                        auto dbgStrip = wbwopenglapi::detail::buildStrokeStrip(dbgPts, false, 3.0f);
-                        for (size_t i = 0; i < dbgStrip.size(); ++i) {
-                            std::fprintf(stderr, "  v[%zu]=(%.2f, %.2f)\n", i,
-                                         static_cast<double>(dbgStrip[i].x),
-                                         static_cast<double>(dbgStrip[i].y));
-                        }
-                        std::fprintf(stderr, "[dbg] 终点区域(347..351,216..223):\n");
-                        for (int dx = 347; dx <= 351; ++dx) {
-                            std::fprintf(stderr, "  x=%d:", dx);
-                            for (int dy = 216; dy <= 223; ++dy) {
-                                unsigned char q[4] = {0};
-                                readPx(dx, dy, q);
-                                std::fprintf(stderr, " %d,%d,%d", q[0], q[1], q[2]);
-                            }
-                            std::fprintf(stderr, "\n");
-                        }
-                    }
                     saveBmp((std::string("test/12_antialias_") + modes[m] + ".bmp").c_str());
 
                     const int mid = midToneCount();
