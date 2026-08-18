@@ -52,6 +52,7 @@
 #include <GLFW/glfw3.h>
 
 #include <cctype>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -64,6 +65,12 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// 配套头文件：
+//   lines.hpp - 像素级直线光栅化算法（DDA / Bresenham / Wu，无 GL 依赖）
+//   aa.hpp    - 抗锯齿离屏 FBO RAII 与 FXAA/MLAA 片元着色器
+#include "wbwopenglapi_lines.hpp"
+#include "wbwopenglapi_aa.hpp"
 
 namespace wbwopenglapi {
 
@@ -1079,13 +1086,16 @@ inline std::shared_ptr<GlfwLife>& glfwLife() {
 class Window {
 public:
     // 创建窗口并初始化 GL 3.3 core 上下文（GLAD 加载 + 版本校验）
-    Window(int w, int h, const std::string& title, bool resizable = true) {
+    // visible=false 创建隐藏窗口（无头渲染，供 Node.js 绑定等使用）
+    Window(int w, int h, const std::string& title, bool resizable = true,
+           bool visible = true) {
         glfwLife_ = detail::glfwLife();
 
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
         glfwWindowHint(GLFW_RESIZABLE, resizable ? GLFW_TRUE : GLFW_FALSE);
+        glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
 #ifdef __APPLE__
         glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 #endif
@@ -1152,7 +1162,8 @@ public:
     // ---- 事件循环 ----
     bool shouldClose() const { return glfwWindowShouldClose(window_) != 0; }
     void pollEvents() { glfwPollEvents(); }
-    void swapBuffers() { glfwSwapBuffers(window_); }
+    // 提交帧（swapBuffers 前自动调用已注册 Canvas 的抗锯齿 resolve，定义见类外）
+    void swapBuffers();
     void close() { glfwSetWindowShouldClose(window_, GLFW_TRUE); }
 
     // ---- 输入轮询 ----
@@ -1164,9 +1175,21 @@ public:
 
     GLFWwindow* nativeHandle() const { return window_; }
 
+    // 内部：Canvas 构造/析构时注册注销（用于 swapBuffers 前触发 present）
+    void attachCanvas(class Canvas* c) { attached_.push_back(c); }
+    void detachCanvas(class Canvas* c) {
+        for (size_t i = 0; i < attached_.size(); ++i) {
+            if (attached_[i] == c) {
+                attached_.erase(attached_.begin() + static_cast<ptrdiff_t>(i));
+                break;
+            }
+        }
+    }
+
 private:
     GLFWwindow* window_ = nullptr;
     std::shared_ptr<detail::GlfwLife> glfwLife_;
+    std::vector<class Canvas*> attached_;
 };
 
 // =====================================================================
@@ -1174,6 +1197,7 @@ private:
 // =====================================================================
 class Canvas {
 public:
+    friend class Window; // Window::swapBuffers 需要触发 Canvas::present
     explicit Canvas(Window& win) : window_(win) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1209,10 +1233,14 @@ public:
         glBindVertexArray(0);
 
         resetTransform();
+        window_.attachCanvas(this);
     }
+
+    ~Canvas() { window_.detachCanvas(this); }
 
     // 清屏（Canvas 无背景概念，此为便捷扩展）
     void clear(const Color& c) {
+        ensureFrame();
         updateViewport();
         glClearColor(c.r, c.g, c.b, c.a);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -1242,6 +1270,45 @@ public:
         if (a > 1.0) a = 1.0;
         globalAlpha_ = a;
     }
+
+    // 线条光栅化算法（仅影响用户路径 stroke()；strokeText/strokeRect 始终矢量描边）
+    //   "default"   三角带矢量描边（默认，= 现有行为；尊重 lineWidth）
+    //   "dda"       逐像素直线（1px，无抗锯齿，阶梯锯齿）
+    //   "bresenham" 逐像素直线（1px，整数误差累积，无抗锯齿）
+    //   "wu"        Xiaolin Wu 抗锯齿直线（1px，相邻像素 alpha 渐变）
+    // 设为 dda/bresenham/wu 时 lineWidth 被忽略（固定 1px 逻辑线宽）；
+    // 未知值回退 "default"。
+    void lineAlgorithm(const std::string& name) {
+        if (name == "dda") {
+            lineAlgorithm_ = detail::LineAlgo::Dda;
+        } else if (name == "bresenham") {
+            lineAlgorithm_ = detail::LineAlgo::Bresenham;
+        } else if (name == "wu") {
+            lineAlgorithm_ = detail::LineAlgo::Wu;
+        } else {
+            lineAlgorithm_ = detail::LineAlgo::Default;
+        }
+    }
+
+    // 全局抗锯齿模式（影响整帧渲染，含文本/路径/图像）：
+    //   "off"   直接绘制默认 framebuffer（默认；零额外开销，输出与旧版一致）
+    //   "ssaa"  2x 超采样离屏渲染后缩小（画质最高，片元开销 ~4x）
+    //   "msaa"  4x 多重采样离屏渲染后 resolve（画质/性能均衡，推荐启用）
+    //   "fxaa"  全屏后处理（快；文本/细线边缘会轻微模糊）
+    //   "mlaa"  简化形态学抗锯齿两遍后处理（快；质量低于 FXAA）
+    // 未知值回退 "off"。模式在下一帧 clear()/绘制时生效。
+    void antialias(const std::string& mode) {
+        if (mode == "ssaa" || mode == "msaa" || mode == "fxaa" || mode == "mlaa") {
+            antialias_ = mode;
+        } else {
+            antialias_ = "off";
+        }
+        aaDirty_ = true;
+    }
+
+    // 主动把离屏结果合成到默认 framebuffer（通常由 swapBuffers 自动完成；
+    // 帧内显式调用可在不交换缓冲的前提下读回最终像素，如 Node 导出）
+    void resolve() { present(); }
 
     // ---------------- 矩形 ----------------
 
@@ -1636,6 +1703,7 @@ public:
             ndc[i].px = m[0] * src[i].px + m[3] * src[i].py + m[6];
             ndc[i].py = m[1] * src[i].px + m[4] * src[i].py + m[7];
         }
+        ensureFrame(); // 抗锯齿模式：首次绘制切换离屏 FBO
         texProgram_->use();
         glUniform4f(texProgram_->uniform("u_color"), 1.0f, 1.0f, 1.0f,
                     static_cast<float>(globalAlpha_));
@@ -1727,6 +1795,27 @@ void main() {
 }
 )GLSL";
 
+    // 像素级线条通道着色器（位置 + 每像素覆盖度 alpha 交错顶点）
+    static constexpr const char* kPixelVS = R"GLSL(
+#version 330 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in float a_alpha;
+out float v_alpha;
+void main() {
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+    v_alpha = a_alpha;
+}
+)GLSL";
+    static constexpr const char* kPixelFS = R"GLSL(
+#version 330 core
+uniform vec4 u_color;
+in float v_alpha;
+out vec4 frag;
+void main() {
+    frag = vec4(u_color.rgb, u_color.a * v_alpha);
+}
+)GLSL";
+
     // 逻辑像素 -> framebuffer 像素（HiDPI 缩放；宽高为 0 时退化 1:1）
     float logicalToFbX(double x) const {
         int fw = window_.framebufferWidth();
@@ -1740,14 +1829,19 @@ void main() {
     }
 
     // 以 framebuffer 尺寸刷新视口与投影矩阵（y 向下，原点左上）。
+    // 抗锯齿模式下视口按当前绘制目标（离屏 FBO 或默认 framebuffer）的尺寸，
+    // 但投影恒按逻辑画布尺寸（framebuffer 尺寸）——SSAA 离屏为 2x 时，
+    // 内容仍按逻辑坐标布局，由视口放大采样（否则内容会缩小 2 倍）。
     // proj_ 按列主序存储 mat3：col0=(2/fw,0,0) col1=(0,-2/fh,0) col2=(-1,1,1)
     void updateViewport() {
-        int fw = window_.framebufferWidth();
-        int fh = window_.framebufferHeight();
+        const int fw = window_.framebufferWidth();
+        const int fh = window_.framebufferHeight();
         if (fw <= 0 || fh <= 0) {
             return;
         }
-        glViewport(0, 0, fw, fh);
+        const int vw = curTargetW_ > 0 ? curTargetW_ : fw;
+        const int vh = curTargetH_ > 0 ? curTargetH_ : fh;
+        glViewport(0, 0, vw, vh);
         proj_[0] = 2.0f / fw;
         proj_[1] = 0.0f;
         proj_[2] = 0.0f;
@@ -1765,6 +1859,7 @@ void main() {
     // 否则使用给定矩阵（列主序 mat3，如 fill() 的全屏四边形用单位矩阵）。
     void drawSolid(const Color& c, const detail::Vec2* verts, size_t count,
                    const float* mat = nullptr) {
+        ensureFrame(); // 抗锯齿模式：首次绘制切换离屏 FBO（本帧内只做一次）
         // mat 非空 = NDC 空间直写（如 stencil 全屏 quad），不受当前变换影响；
         // mat 为空 = 像素空间，顶点经当前变换（current_）后再投影（proj_）。
         float m[9];
@@ -1831,8 +1926,263 @@ void main() {
         glClear(GL_STENCIL_BUFFER_BIT);
     }
 
-    // 粗线描边任意路径命令序列（逐子路径）
-    void strokeOutline(const std::vector<detail::PathSeg>& segs, const Color& c) {
+    // ---------------- 像素级线条（lineAlgorithm != "default"） ----------------
+
+    // 惰性创建像素通道（着色器 + 位置/alpha 交错的 VAO/VBO）
+    void ensurePixelPipeline() {
+        if (pixelProgram_) {
+            return;
+        }
+        pixelProgram_ = std::make_unique<detail::Program>(kPixelVS, kPixelFS);
+        pixelVao_ = std::make_unique<detail::VertexArray>();
+        pixelVbo_ = std::make_unique<detail::VertexBuffer>();
+        pixelVao_->bind();
+        pixelVbo_->bind();
+        const GLsizei stride = 3 * static_cast<GLsizei>(sizeof(float));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride,
+                              reinterpret_cast<void*>(0));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, stride,
+                              reinterpret_cast<void*>(2 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+
+    // 按当前 lineAlgorithm_ 把路径折线光栅化为覆盖像素并绘制。
+    // 折线顶点先经当前变换（current_）映射到画布坐标，再按逻辑像素网格选点；
+    // 每覆盖像素生成 1x1 四边形（Wu 相邻像素带 alpha 渐变），
+    // 顶点已处于画布像素空间，直接乘 proj_ 变换到 NDC。
+    void strokePixels(const std::vector<detail::PathSeg>& segs, const Color& c) {
+        const std::vector<detail::SubPath> subs = detail::flattenPath(segs);
+        std::vector<detail::PixelRun> runs;
+        const float* m = current_;
+        for (const detail::SubPath& sub : subs) {
+            const size_t n = sub.points.size();
+            if (n < 2) {
+                continue;
+            }
+            const size_t segN = sub.closed ? n : n - 1;
+            for (size_t i = 0; i < segN; ++i) {
+                const detail::Vec2& a = sub.points[i % n];
+                const detail::Vec2& b = sub.points[(i + 1) % n];
+                const double ax = m[0] * a.x + m[3] * a.y + m[6];
+                const double ay = m[1] * a.x + m[4] * a.y + m[7];
+                const double bx = m[0] * b.x + m[3] * b.y + m[6];
+                const double by = m[1] * b.x + m[4] * b.y + m[7];
+                switch (lineAlgorithm_) {
+                    case detail::LineAlgo::Dda:
+                        detail::rasterDDA(ax, ay, bx, by, runs);
+                        break;
+                    case detail::LineAlgo::Bresenham:
+                        detail::rasterBresenham(
+                            static_cast<int>(std::floor(ax + 0.5)),
+                            static_cast<int>(std::floor(ay + 0.5)),
+                            static_cast<int>(std::floor(bx + 0.5)),
+                            static_cast<int>(std::floor(by + 0.5)), runs);
+                        break;
+                    case detail::LineAlgo::Wu:
+                        detail::rasterWu(ax, ay, bx, by, runs);
+                        break;
+                    default:
+                        return; // "default" 不会进入本函数
+                }
+            }
+        }
+        if (runs.empty()) {
+            return;
+        }
+        // 去重（相邻段共享端点）：按 y,x 排序，同像素保留最大覆盖度
+        std::sort(runs.begin(), runs.end(),
+                  [](const detail::PixelRun& p, const detail::PixelRun& q) {
+                      return p.y != q.y ? p.y < q.y : p.x < q.x;
+                  });
+        std::vector<detail::PixelRun> uniq;
+        uniq.reserve(runs.size());
+        for (const detail::PixelRun& r : runs) {
+            if (!uniq.empty() && uniq.back().x == r.x && uniq.back().y == r.y) {
+                if (r.alpha > uniq.back().alpha) {
+                    uniq.back().alpha = r.alpha;
+                }
+            } else {
+                uniq.push_back(r);
+            }
+        }
+        drawPixels(c, uniq);
+    }
+
+    // 把覆盖像素列表绘制为 1x1 四边形（含每像素覆盖度 alpha），
+    // 颜色 alpha = 样式 alpha * globalAlpha * 覆盖度
+    void drawPixels(const Color& c, const std::vector<detail::PixelRun>& runs) {
+        if (runs.empty()) {
+            return;
+        }
+        ensurePixelPipeline();
+        ensureFrame(); // 抗锯齿模式：离屏绘制
+        const int fw = curTargetW_ > 0 ? curTargetW_ : window_.framebufferWidth();
+        const int fh = curTargetH_ > 0 ? curTargetH_ : window_.framebufferHeight();
+        struct PVertex {
+            float x, y, a;
+        };
+        std::vector<PVertex> verts;
+        verts.reserve(runs.size() * 6);
+        for (const detail::PixelRun& r : runs) {
+            if (r.x < 0 || r.y < 0 || r.x >= fw || r.y >= fh) {
+                continue;
+            }
+            const float x0 = static_cast<float>(r.x);
+            const float y0 = static_cast<float>(r.y);
+            const float x1 = x0 + 1.0f;
+            const float y1 = y0 + 1.0f;
+            const float a = r.alpha;
+            verts.push_back({x0, y0, a});
+            verts.push_back({x1, y0, a});
+            verts.push_back({x1, y1, a});
+            verts.push_back({x0, y0, a});
+            verts.push_back({x1, y1, a});
+            verts.push_back({x0, y1, a});
+        }
+        if (verts.empty()) {
+            return;
+        }
+        // 画布像素坐标 -> NDC（proj_）
+        const float* m = proj_;
+        for (PVertex& v : verts) {
+            const float ox = v.x, oy = v.y;
+            v.x = m[0] * ox + m[3] * oy + m[6];
+            v.y = m[1] * ox + m[4] * oy + m[7];
+        }
+        pixelProgram_->use();
+        glUniform4f(pixelProgram_->uniform("u_color"), c.r, c.g, c.b,
+                    c.a * static_cast<float>(globalAlpha_));
+        pixelVao_->bind();
+        pixelVbo_->upload(verts.data(),
+                          static_cast<GLsizeiptr>(verts.size() * sizeof(PVertex)));
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size() / 3));
+        glBindVertexArray(0);
+    }
+
+    // ---------------- 抗锯齿管线（antialias()） ----------------
+
+    // 帧内首个绘制调用前：切换离屏 FBO（只执行一次/帧）
+    void ensureFrame() {
+        if (antialias_ == "off" || !aaDirty_) {
+            return;
+        }
+        aaDirty_ = false;
+        beginFrame();
+    }
+
+    // 绑定离屏 FBO 并按其尺寸设置视口/投影（含 FBO 惰性创建与 resize 重建）
+    void beginFrame() {
+        const int fw = window_.framebufferWidth();
+        const int fh = window_.framebufferHeight();
+        const int scale = antialias_ == "ssaa" ? 2 : 1;
+        const int samples = antialias_ == "msaa" ? 4 : 0;
+        if (!aaFbo_ || aaFbo_->width() != fw * scale ||
+            aaFbo_->height() != fh * scale || aaFbo_->samples() != samples) {
+            aaFbo_ = std::make_unique<detail::FrameBuffer>(fw * scale, fh * scale,
+                                                           samples);
+        }
+        curTargetW_ = fw * scale;
+        curTargetH_ = fh * scale;
+        aaFbo_->bindDraw();
+        glViewport(0, 0, fw * scale, fh * scale);
+        updateViewport();
+    }
+
+    // 帧末：按模式把离屏结果 resolve 到默认 framebuffer。
+    // 由 Window::swapBuffers() 在交换缓冲前自动调用
+    void present() {
+        if (antialias_ == "off" || !aaFbo_) {
+            aaDirty_ = true;
+            return;
+        }
+        const int fw = window_.framebufferWidth();
+        const int fh = window_.framebufferHeight();
+        aaFbo_->bindRead();
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        if (antialias_ == "ssaa" || antialias_ == "msaa") {
+            // SSAA：2x 缩小采样（GL_LINEAR）；MSAA：多重采样自动 resolve
+            glBlitFramebuffer(0, 0, aaFbo_->width(), aaFbo_->height(), 0, 0, fw, fh,
+                              GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        } else {
+            // FXAA / MLAA 后处理（全屏四边形，复用纹理通道 VAO）
+            ensurePostPipeline();
+            glViewport(0, 0, fw, fh);
+            if (antialias_ == "fxaa") {
+                fxaaProg_->use();
+                glUniform2f(fxaaProg_->uniform("u_texel"), 1.0f / fw, 1.0f / fh);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, aaFbo_->colorTexture());
+                glUniform1i(fxaaProg_->uniform("u_tex"), 0);
+                drawPostQuad();
+            } else { // mlaa
+                if (!mlaaFbo_ || mlaaFbo_->width() != fw || mlaaFbo_->height() != fh) {
+                    mlaaFbo_ =
+                        std::make_unique<detail::FrameBuffer>(fw, fh, 0);
+                }
+                // pass1：亮度梯度边缘图 -> mlaaFbo_
+                mlaaFbo_->bindBoth();
+                mlaaEdgeProg_->use();
+                glUniform2f(mlaaEdgeProg_->uniform("u_texel"), 1.0f / fw, 1.0f / fh);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, aaFbo_->colorTexture());
+                glUniform1i(mlaaEdgeProg_->uniform("u_tex"), 0);
+                drawPostQuad();
+                // pass2：沿边缘方向混合 -> 默认 framebuffer
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+                mlaaSmoothProg_->use();
+                glUniform2f(mlaaSmoothProg_->uniform("u_texel"), 1.0f / fw, 1.0f / fh);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, aaFbo_->colorTexture());
+                glUniform1i(mlaaSmoothProg_->uniform("u_color"), 0);
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, mlaaFbo_->colorTexture());
+                glUniform1i(mlaaSmoothProg_->uniform("u_edge"), 1);
+                drawPostQuad();
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, fw, fh);
+        curTargetW_ = 0;
+        curTargetH_ = 0;
+        updateViewport();
+        aaDirty_ = true;
+    }
+
+    // 惰性创建 FXAA/MLAA 后处理程序
+    void ensurePostPipeline() {
+        if (fxaaProg_) {
+            return;
+        }
+        fxaaProg_ = std::make_unique<detail::Program>(kTexVS, detail::kFxaaFS);
+        mlaaEdgeProg_ = std::make_unique<detail::Program>(kTexVS, detail::kMlaaEdgeFS);
+        mlaaSmoothProg_ = std::make_unique<detail::Program>(kTexVS, detail::kMlaaSmoothFS);
+    }
+
+    // 全屏 NDC 四边形（uv 0..1；v=0 对应纹理底部 = 窗口 y=0 行，无需翻转）
+    void drawPostQuad() {
+        const TexVertex quad[6] = {
+            {-1.0f, -1.0f, 0.0f, 0.0f}, {1.0f, -1.0f, 1.0f, 0.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f},   {-1.0f, -1.0f, 0.0f, 0.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f},   {-1.0f, 1.0f, 0.0f, 1.0f},
+        };
+        texVao_->bind();
+        texVbo_->upload(quad, static_cast<GLsizeiptr>(sizeof(quad)));
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindVertexArray(0);
+    }
+
+    // 描边任意路径命令序列（逐子路径）。
+    // pixelOk=false 时强制走矢量三角带（strokeText 字体轮廓用，避免像素化）
+    void strokeOutline(const std::vector<detail::PathSeg>& segs, const Color& c,
+                       bool pixelOk = true) {
+        if (pixelOk && lineAlgorithm_ != detail::LineAlgo::Default) {
+            strokePixels(segs, c);
+            return;
+        }
         const std::vector<detail::SubPath> subs = detail::flattenPath(segs);
         for (const detail::SubPath& sub : subs) {
             if (sub.points.size() < 2) {
@@ -1955,7 +2305,7 @@ void main() {
             if (fill) {
                 fillOutline(segs, fillStyle_);
             } else {
-                strokeOutline(segs, strokeStyle_);
+                strokeOutline(segs, strokeStyle_, false); // 字体轮廓始终矢量描边
             }
         };
         if (!shaped.empty()) {
@@ -2010,6 +2360,32 @@ void main() {
     TextBaseline textBaseline_ = TextBaseline::Alphabetic;
     std::string fontCss_;
     std::vector<std::pair<std::string, bool>> features_; // 空 = 特性全关（默认）
+
+    // 线条算法（lineAlgorithm 属性）与像素通道
+    detail::LineAlgo lineAlgorithm_ = detail::LineAlgo::Default;
+    std::unique_ptr<detail::Program> pixelProgram_;
+    std::unique_ptr<detail::VertexArray> pixelVao_;
+    std::unique_ptr<detail::VertexBuffer> pixelVbo_;
+
+    // 抗锯齿（antialias 属性）：离屏 FBO + 后处理程序
+    std::string antialias_ = "off";
+    std::unique_ptr<detail::FrameBuffer> aaFbo_;    // 当前模式离屏绘制目标
+    std::unique_ptr<detail::FrameBuffer> mlaaFbo_;  // MLAA pass1 边缘图
+    std::unique_ptr<detail::Program> fxaaProg_;
+    std::unique_ptr<detail::Program> mlaaEdgeProg_;
+    std::unique_ptr<detail::Program> mlaaSmoothProg_;
+    int curTargetW_ = 0;  // 当前绘制目标尺寸（0 = 窗口 framebuffer）
+    int curTargetH_ = 0;
+    bool aaDirty_ = true; // 帧内首个绘制调用需切换离屏 FBO
 };
+
+// Window::swapBuffers 类外定义（须在 Canvas 完整定义之后：
+// 交换缓冲前自动触发已注册 Canvas 的抗锯齿 resolve）
+inline void Window::swapBuffers() {
+    for (Canvas* c : attached_) {
+        c->present();
+    }
+    glfwSwapBuffers(window_);
+}
 
 } // namespace wbwopenglapi
