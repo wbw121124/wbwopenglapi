@@ -113,11 +113,35 @@
     6. save/restore 的 font 恢复：比较 fontCss_ 字符串，不同则重建
        FontFace 并清字形缓存。
   - 待解决：剩余阶段（示例/文档）。
-- [ ] 阶段 4 路径系统：fill(stencil) / stroke(粗线) / arc / 贝塞尔
-- [ ] 阶段 5 矢量文本：GDI / FreeType 双后端
-- [ ] 阶段 6 进阶：变换矩阵栈 + drawImage / BMP
-- [ ] 阶段 7 示例：演示程序
-- [ ] 阶段 8 文档：README + 中文注释
+- [x] 阶段 7 示例：演示程序（2026-08-18）
+  - 阶段目标：08_demo 综合演示，覆盖全部 API（矩形/路径/文本/变换/图像）
+    并带动画（旋转星形、摆动标题、旋转图像、贝塞尔曲线、even-odd 圆环）。
+  - 完成情况：08_demo 双后端（gdi/freetype）编译通过，测试模式运行 3 秒
+    自动退出码 0。build.ps1 清理 03_text 残留逻辑（阶段 5 已将文本示例
+    重命名为 05_text）。
+  - 待解决：剩余阶段（文档）。
+- [x] 阶段 8 文档：README + 中文注释（2026-08-18）
+  - 阶段目标：README.md（特性/构建/示例/API 一览/坐标系/技术要点/目录结构）。
+  - 完成情况：README.md 定稿；头文件关键排障结论（矩阵/单位/v 坐标/对齐）
+    已写入 plan.md 各阶段记录与代码注释。
+  - 收尾排障（重要）：
+    1. **freetype 后端构建假象**：阶段 5/6 的"freetype 构建成功"实为误判——
+       build.ps1 编译失败（throw）被 `Select-Object -Last 1` 吞掉，随后运行
+       的是 build/ 里上一次 gdi 构建的 exe（像素结果相同），掩盖了失败。
+    2. **FT_Outline_Decompose 未声明**：freetype.h 不自动包含 ftoutln.h，
+       需显式 `#include <freetype/ftoutln.h>`（已加）。
+    3. **msys2 版 libfreetype-6.dll 依赖链过深**：依赖 libharfbuzz-0.dll /
+       libpng16-16.dll / libbrotlidec.dll / libbz2-1.dll / zlib1.dll，
+       MSVC 版 harfbuzz 又会拖入 glib/icu 等，无法简单拷贝运行
+       （0xC0000135 DLL 缺失）。
+    4. **换源**：改用 ubawurinna/freetype-windows-binaries（官方源码
+       VS2026 预编译 x64 freetype.dll，仅依赖 Universal CRT）。
+       MinGW g++ 可**直接链接该 DLL**（须放在源码之后，链接顺序敏感），
+       include 路径为 freetype/include（无 freetype2 子目录）；
+       fetch_deps.ps1 / build.ps1 / CMakeLists.txt 已同步更新。
+    5. **回归纪律**：全量构建须检查每行 [ok] 与警告；运行测试前确认
+       exe 依赖（objdump -p）包含 freetype.dll 再判定后端生效。
+  - 待解决：全部阶段完成。
 
 ## 项目目标
 

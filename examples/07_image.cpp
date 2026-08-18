@@ -21,8 +21,8 @@ int main(int argc, char** argv) {
     bool testMode = (argc > 1 && std::strcmp(argv[1], "-t") == 0);
     try {
         const wbwopenglapi::Image img = wbwopenglapi::loadBMP("examples/test.bmp");
-        std::printf("图像尺寸: %dx%d (通道 %zu 字节)\n", img.width, img.height,
-                    img.rgba.size());
+        std::printf("图像尺寸: %dx%d (通道 %d 字节)\n", img.width, img.height,
+                    static_cast<int>(img.rgba.size()));
 
         wbwopenglapi::Window win(800, 600, "wbwopenglapi 07_image", true);
         wbwopenglapi::Canvas ctx(win);

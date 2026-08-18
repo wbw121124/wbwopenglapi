@@ -27,6 +27,7 @@
 #if defined(WBWOPENGAL_API_FONT_FREETYPE)
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include <freetype/ftoutln.h> // FT_Outline_Decompose（freetype.h 不自动包含）
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

@@ -68,37 +68,23 @@ if (-not $gladDone) {
 }
 
 # ---------------- FreeType (可选) ----------------
-$ftDone = Test-Path (Join-Path $third 'freetype\include\freetype2\ft2build.h')
+# 源: ubawurinna/freetype-windows-binaries（官方源码预编译 x64 DLL，
+#     仅依赖 Universal CRT；msys2 版 libfreetype-6.dll 依赖
+#     harfbuzz/libpng 等 DLL 链，MinGW 直链过深，故改用此源）
+$ftDone = Test-Path (Join-Path $third 'freetype\include\ft2build.h')
 if ($SkipFreeType) { $ftDone = $true }
 if (-not $ftDone) {
     try {
-        if (-not (Test-Path $zstdExe)) {
-            $zip = Join-Path $tmp 'zstd.zip'
-            Invoke-Download 'https://ghfast.top/https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-v1.5.6-win64.zip' $zip
-            $dst = Join-Path $tmp 'zstd_x'
-            if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
-            Expand-Archive -Path $zip -DestinationPath $dst
-            $zstdSrc = Get-ChildItem $dst -Recurse -Filter 'zstd.exe' | Select-Object -First 1
-            Copy-Item -Force $zstdSrc.FullName $zstdExe
-        }
-        $list = Join-Path $tmp 'msys2.html'
-        Invoke-Download 'https://repo.msys2.org/mingw/x86_64/' $list
-        $pkg = Select-String -Path $list -Pattern 'mingw-w64-x86_64-freetype-[\d.]+-\d+-any\.pkg\.tar\.zst' -AllMatches |
-            ForEach-Object { $_.Matches.Value } | Sort-Object -Unique | Select-Object -Last 1
-        if (-not $pkg) { throw '未在 msys2 仓库中找到 freetype 包' }
-        $zst = Join-Path $tmp $pkg
-        Invoke-Download ('https://repo.msys2.org/mingw/x86_64/' + $pkg) $zst
-        $tar = Join-Path $tmp 'freetype.pkg.tar'
-        & $zstdExe -d $zst -o $tar -f
-        $dst = Join-Path $tmp 'freetype_x'
+        $zip = Join-Path $tmp 'ftwb.zip'
+        Invoke-Download 'https://codeload.github.com/ubawurinna/freetype-windows-binaries/zip/refs/heads/master' $zip
+        $dst = Join-Path $tmp 'ftwb_x'
         if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
         New-Item -ItemType Directory -Force -Path $dst | Out-Null
-        tar -xf $tar -C $dst
+        tar -xf $zip -C $dst
+        $src = Get-ChildItem $dst -Directory | Select-Object -First 1
         New-Item -ItemType Directory -Force -Path (Join-Path $third 'freetype') | Out-Null
-        Copy-Item -Recurse -Force (Join-Path $dst 'mingw64\include\freetype2') (Join-Path $third 'freetype\include\')
-        Copy-Item -Force (Join-Path $dst 'mingw64\lib\libfreetype.dll.a'),
-                         (Join-Path $dst 'mingw64\lib\libfreetype.a') (Join-Path $third 'freetype\lib\')
-        Copy-Item -Force (Join-Path $dst 'mingw64\bin\libfreetype-6.dll') (Join-Path $third 'freetype\bin\')
+        Copy-Item -Recurse -Force (Join-Path $src 'include') (Join-Path $third 'freetype\include\')
+        Copy-Item -Force (Join-Path $src 'release dll\x64\freetype.dll') (Join-Path $third 'freetype\bin\')
         Write-Host '[ok] FreeType -> third_party/freetype'
     } catch {
         Write-Warning "FreeType 获取失败（可选依赖，GDI 后端不受影响）: $_"
