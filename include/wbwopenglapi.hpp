@@ -252,6 +252,109 @@ inline std::vector<Vec2> buildStrokeStrip(const std::vector<Vec2>& pts, bool clo
     return out;
 }
 
+// =====================================================================
+// 路径：命令序列 -> 子路径折线（贝塞尔 de Casteljau 细分）
+// =====================================================================
+
+inline constexpr double kPi = 3.14159265358979323846;
+
+enum class PathCmd { MoveTo, LineTo, QuadraticTo, CubicTo, Close };
+
+struct PathSeg {
+    PathCmd cmd;
+    float x1 = 0.0f, y1 = 0.0f;
+    float x2 = 0.0f, y2 = 0.0f;
+    float x3 = 0.0f, y3 = 0.0f;
+};
+
+struct SubPath {
+    std::vector<Vec2> points;
+    bool closed = false;
+};
+
+// de Casteljau 递归细分（depth 级），追加折线点（不含首点）
+inline void splitQuad(const Vec2& p0, const Vec2& p1, const Vec2& p2,
+                      std::vector<Vec2>& out, int depth) {
+    if (depth <= 0) {
+        out.push_back(p2);
+        return;
+    }
+    Vec2 a{(p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f};
+    Vec2 b{(p1.x + p2.x) * 0.5f, (p1.y + p2.y) * 0.5f};
+    Vec2 m{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
+    splitQuad(p0, a, m, out, depth - 1);
+    splitQuad(m, b, p2, out, depth - 1);
+}
+
+inline void splitCubic(const Vec2& p0, const Vec2& p1, const Vec2& p2, const Vec2& p3,
+                       std::vector<Vec2>& out, int depth) {
+    if (depth <= 0) {
+        out.push_back(p3);
+        return;
+    }
+    Vec2 a{(p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f};
+    Vec2 b{(p1.x + p2.x) * 0.5f, (p1.y + p2.y) * 0.5f};
+    Vec2 c{(p2.x + p3.x) * 0.5f, (p2.y + p3.y) * 0.5f};
+    Vec2 ab{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
+    Vec2 bc{(b.x + c.x) * 0.5f, (b.y + c.y) * 0.5f};
+    Vec2 m{(ab.x + bc.x) * 0.5f, (ab.y + bc.y) * 0.5f};
+    splitCubic(p0, a, ab, m, out, depth - 1);
+    splitCubic(m, bc, c, p3, out, depth - 1);
+}
+
+// 把命令序列展开为子路径折线（fill/stroke 共用）
+inline std::vector<SubPath> flattenPath(const std::vector<PathSeg>& segs) {
+    std::vector<SubPath> subs;
+    SubPath cur;
+    auto commit = [&]() {
+        if (!cur.points.empty()) {
+            subs.push_back(cur);
+        }
+        cur = SubPath{};
+    };
+    for (const PathSeg& s : segs) {
+        switch (s.cmd) {
+        case PathCmd::MoveTo: {
+            commit();
+            cur.points.push_back({s.x1, s.y1});
+            break;
+        }
+        case PathCmd::LineTo: {
+            if (cur.points.empty()) {
+                cur.points.push_back({s.x1, s.y1});
+            }
+            cur.points.push_back({s.x1, s.y1});
+            break;
+        }
+        case PathCmd::QuadraticTo: {
+            if (cur.points.empty()) {
+                cur.points.push_back({s.x1, s.y1});
+            }
+            const Vec2 p0 = cur.points.back();
+            splitQuad(p0, {s.x1, s.y1}, {s.x2, s.y2}, cur.points, 6);
+            break;
+        }
+        case PathCmd::CubicTo: {
+            if (cur.points.empty()) {
+                cur.points.push_back({s.x1, s.y1});
+            }
+            const Vec2 p0 = cur.points.back();
+            splitCubic(p0, {s.x1, s.y1}, {s.x2, s.y2}, {s.x3, s.y3}, cur.points, 6);
+            break;
+        }
+        case PathCmd::Close: {
+            if (!cur.points.empty()) {
+                cur.closed = true;
+                commit();
+            }
+            break;
+        }
+        }
+    }
+    commit();
+    return subs;
+}
+
 } // namespace detail
 
 // =====================================================================
@@ -624,6 +727,169 @@ public:
         glDisable(GL_SCISSOR_TEST);
     }
 
+    // ---------------- 路径 ----------------
+
+    // 清空当前路径
+    void beginPath() {
+        path_.clear();
+        subPathPoints_ = 0;
+    }
+
+    void moveTo(double x, double y) {
+        path_.push_back({detail::PathCmd::MoveTo, static_cast<float>(x),
+                         static_cast<float>(y)});
+        subPathPoints_ = 1;
+    }
+
+    void lineTo(double x, double y) {
+        if (subPathPoints_ == 0) {
+            moveTo(x, y); // Canvas 语义：无当前点时等价 moveTo
+            return;
+        }
+        path_.push_back({detail::PathCmd::LineTo, static_cast<float>(x),
+                         static_cast<float>(y)});
+        ++subPathPoints_;
+    }
+
+    void quadraticCurveTo(double cx, double cy, double x, double y) {
+        if (subPathPoints_ == 0) {
+            moveTo(cx, cy); // Canvas 语义：无当前点时等价 moveTo(控制点)
+        }
+        path_.push_back({detail::PathCmd::QuadraticTo, static_cast<float>(cx),
+                         static_cast<float>(cy), static_cast<float>(x),
+                         static_cast<float>(y)});
+        ++subPathPoints_;
+    }
+
+    void bezierCurveTo(double c1x, double c1y, double c2x, double c2y, double x,
+                       double y) {
+        if (subPathPoints_ == 0) {
+            moveTo(c1x, c1y);
+        }
+        path_.push_back({detail::PathCmd::CubicTo, static_cast<float>(c1x),
+                         static_cast<float>(c1y), static_cast<float>(c2x),
+                         static_cast<float>(c2y), static_cast<float>(x),
+                         static_cast<float>(y)});
+        ++subPathPoints_;
+    }
+
+    // 圆弧（Canvas 语义：角度弧度制，y 向下顺时针为正；ccw 逆时针）
+    void arc(double cx, double cy, double r, double a0, double a1, bool ccw = false) {
+        if (r < 0.0) {
+            throw std::invalid_argument("wbwopenglapi: arc 半径不能为负");
+        }
+        if (r == 0.0) { // Canvas 语义：零半径退化为直线到终点
+            if (subPathPoints_ == 0) {
+                moveTo(cx, cy);
+            } else {
+                lineTo(cx, cy);
+            }
+            return;
+        }
+        double delta = a1 - a0;
+        if (ccw) {
+            if (delta > 0.0) {
+                delta -= 2.0 * detail::kPi;
+            }
+        } else {
+            if (delta < 0.0) {
+                delta += 2.0 * detail::kPi;
+            }
+        }
+        const double px = cx + r * std::cos(a0);
+        const double py = cy + r * std::sin(a0);
+        if (subPathPoints_ == 0) {
+            moveTo(px, py);
+        } else {
+            lineTo(px, py);
+        }
+        int n = static_cast<int>(std::ceil(std::abs(delta) / (detail::kPi / 16.0)));
+        if (n < 8) {
+            n = 8;
+        }
+        for (int i = 1; i <= n; ++i) {
+            const double a = a0 + delta * i / n;
+            lineTo(cx + r * std::cos(a), cy + r * std::sin(a));
+        }
+    }
+
+    // 追加矩形子路径（Canvas 语义：moveTo + 3 条 lineTo + closePath）
+    void rect(double x, double y, double w, double h) {
+        moveTo(x, y);
+        lineTo(x + w, y);
+        lineTo(x + w, y + h);
+        lineTo(x, y + h);
+        closePath();
+    }
+
+    // 闭合当前子路径（stroke 时首尾相连，fill 时视为闭合）
+    void closePath() {
+        if (subPathPoints_ == 0) {
+            return;
+        }
+        path_.push_back({detail::PathCmd::Close});
+        subPathPoints_ = 0;
+    }
+
+    // 用 fillStyle 填充当前路径（stencil even-odd 两遍法）
+    void fill() {
+        const std::vector<detail::SubPath> subs = detail::flattenPath(path_);
+        bool hasShape = false;
+        for (const detail::SubPath& sub : subs) {
+            if (sub.points.size() >= 3) {
+                hasShape = true;
+                break;
+            }
+        }
+        if (!hasShape) {
+            return;
+        }
+        // Pass 1: 轮廓三角扇写入 stencil（GL_INVERT -> even-odd）
+        glEnable(GL_STENCIL_TEST);
+        glStencilMask(0xFF);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
+        for (const detail::SubPath& sub : subs) {
+            const size_t n = sub.points.size();
+            if (n < 3) {
+                continue;
+            }
+            const detail::Vec2& p0 = sub.points[0];
+            for (size_t i = 1; i + 1 < n; ++i) {
+                const detail::Vec2 tris[3] = {p0, sub.points[i],
+                                              sub.points[i + 1]};
+                drawSolid(fillStyle_, tris, 3);
+            }
+        }
+        // Pass 2: stencil 非零区域上色（单位矩阵 + NDC 全屏四边形）
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        const detail::Vec2 quad[6] = {
+            {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f},
+            {-1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f},
+        };
+        drawSolid(fillStyle_, quad, 6, kIdentity);
+        glDisable(GL_STENCIL_TEST);
+        glClear(GL_STENCIL_BUFFER_BIT);
+    }
+
+    // 用 strokeStyle/lineWidth 描边当前路径（复用粗线三角带）
+    void stroke() {
+        const std::vector<detail::SubPath> subs = detail::flattenPath(path_);
+        for (const detail::SubPath& sub : subs) {
+            if (sub.points.size() < 2) {
+                continue;
+            }
+            std::vector<detail::Vec2> strip = detail::buildStrokeStrip(
+                sub.points, sub.closed, static_cast<float>(lineWidth_));
+            if (!strip.empty()) {
+                drawSolid(strokeStyle_, strip.data(), strip.size());
+            }
+        }
+    }
+
 private:
     // solid 通道着色器（阶段 5 增加纹理通道）。
     // 顶点在 CPU 端已变换为 NDC（-1..1），shader 直写：
@@ -680,11 +946,15 @@ void main() {
 
     // 以指定颜色绘制三角形列表（含 globalAlpha）。
     // 顶点在 CPU 变换为 NDC 后上传（见 kSolidVS 注释：驱动 attribute/矩阵限制）。
-    void drawSolid(const Color& c, const detail::Vec2* verts, size_t count) {
+    // mat 为 nullptr 时使用当前 proj_（像素坐标 -> NDC），
+    // 否则使用给定矩阵（列主序 mat3，如 fill() 的全屏四边形用单位矩阵）。
+    void drawSolid(const Color& c, const detail::Vec2* verts, size_t count,
+                   const float* mat = nullptr) {
+        const float* m = mat ? mat : proj_;
         std::vector<detail::Vec2> ndc(count);
         for (size_t i = 0; i < count; ++i) {
-            ndc[i].x = proj_[0] * verts[i].x + proj_[3] * verts[i].y + proj_[6];
-            ndc[i].y = proj_[1] * verts[i].x + proj_[4] * verts[i].y + proj_[7];
+            ndc[i].x = m[0] * verts[i].x + m[3] * verts[i].y + m[6];
+            ndc[i].y = m[1] * verts[i].x + m[4] * verts[i].y + m[7];
         }
         program_->use();
         glUniform4f(program_->uniform("u_color"), c.r, c.g, c.b,
@@ -700,11 +970,16 @@ void main() {
     std::unique_ptr<detail::VertexArray> vao_;
     std::unique_ptr<detail::VertexBuffer> vbo_;
     float proj_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    // 单位矩阵（列主序），用于已处于 NDC 空间的顶点（fill 的全屏四边形）
+    static constexpr float kIdentity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 
     Color fillStyle_{0.0f, 0.0f, 0.0f, 1.0f};
     Color strokeStyle_{0.0f, 0.0f, 0.0f, 1.0f};
     double lineWidth_ = 1.0;
     double globalAlpha_ = 1.0;
+
+    std::vector<detail::PathSeg> path_;
+    int subPathPoints_ = 0; // 当前子路径点数（arc 自动连线判断）
 };
 
 } // namespace wbwopenglapi

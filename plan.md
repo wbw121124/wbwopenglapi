@@ -44,6 +44,19 @@
     5. VertexBuffer::upload 采用首次 glBufferData + 后续 glBufferSubData
        （容量不足才重分配），避免重复重分配。
   - 待解决：剩余阶段（路径/文本/变换/图像/示例/文档）。
+- [x] 阶段 4 路径系统（2026-08-18）
+  - 阶段目标：beginPath/moveTo/lineTo/quadraticCurveTo/bezierCurveTo/arc/
+    closePath/rect/fill/stroke；fill 用 stencil even-odd 两遍法（轮廓三角扇
+    GL_INVERT -> 全屏四边形 GL_NOTEQUAL），stroke 复用 buildStrokeStrip；
+    贝塞尔用 de Casteljau 递归细分（6 级），arc 角度归一（Δ∈[0,2π) 或
+    (-2π,0]）后按弧度步进 π/16 细分。
+  - 完成情况：全部达成。04_path 双后端 9/9 像素校验通过（退出码 0），
+    覆盖：三角形 fill、圆形 arc、**even-odd 环形挖空**、二次/三次贝塞尔区域、
+    未闭合折线 stroke、closePath 闭合菱形 stroke。
+  - 上下文变更：fill 的全屏四边形顶点为 NDC（-1..1），drawSolid 增加可选
+    mat 参数（nullptr=proj_，否则列主序矩阵，单位矩阵 kIdentity）；新增
+    rect() 路径方法（补充进 API 清单）。
+  - 待解决：剩余阶段（文本/变换/图像/示例/文档）。
 - [ ] 阶段 4 路径系统：fill(stencil) / stroke(粗线) / arc / 贝塞尔
 - [ ] 阶段 5 矢量文本：GDI / FreeType 双后端
 - [ ] 阶段 6 进阶：变换矩阵栈 + drawImage / BMP
@@ -115,6 +128,7 @@ class Canvas {                                      // 即 "ctx"，一次创建�
     void quadraticCurveTo(double cx, double cy, double x, double y);
     void bezierCurveTo(double c1x, double c1y, double c2x, double c2y, double x, double y);
     void arc(double cx, double cy, double r, double a0, double a1, bool ccw = false);
+    void rect(double x, double y, double w, double h);  // 追加矩形子路径
     void closePath();
     void fill();                                    // 用 fillStyle 填充当前路径
     void stroke();                                  // 用 strokeStyle/lineWidth 描边
