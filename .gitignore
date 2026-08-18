@@ -1,0 +1,17 @@
+# 第三方依赖（由 scripts/fetch_deps.ps1 生成）
+third_party/
+
+# 构建产物
+build/
+
+# 临时与杂项
+*.exe
+*.dll
+*.o
+*.obj
+*.log
+.vs/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
