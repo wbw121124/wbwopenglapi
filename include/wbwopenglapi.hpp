@@ -22,6 +22,23 @@
 
 // 顺序要求: 先包含 GLAD (gl.h)，再包含 GLFW；GLFW_INCLUDE_NONE 防止 glfw3.h
 // 引入系统 GL/gl.h 与 GLAD 冲突
+//
+// 字体后端平台头文件（须在 GL 头之前，避免 windows.h 与 GL 宏冲突）
+#if defined(WBWOPENGAL_API_FONT_FREETYPE)
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#error "wbwopenglapi: 非 Windows 平台必须定义 WBWOPENGAL_API_FONT_FREETYPE"
+#endif
+
 #define GLFW_INCLUDE_NONE
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
@@ -31,6 +48,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -355,6 +373,82 @@ inline std::vector<SubPath> flattenPath(const std::vector<PathSeg>& segs) {
     return subs;
 }
 
+// =====================================================================
+// 文本：字形轮廓（统一抽象，双后端输出同构 PathSeg 序列）
+// 字形空间坐标: 1/64 像素, y 轴向上, 基线 y=0（画布坐标 = (tx + px/64, ty - py/64)）
+// =====================================================================
+
+struct Glyph {
+    std::vector<PathSeg> outline; // 字形轮廓（MoveTo 分隔轮廓环）
+    double advanceX = 0.0;        // 前进宽度（1/64 像素）
+};
+
+// UTF-8 解码：从 s[i] 处取一个码点，i 前移到下一个字符
+inline uint32_t utf8Next(const std::string& s, size_t& i) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c < 0x80) {
+        i += 1;
+        return c;
+    }
+    int n = 0;
+    uint32_t cp = 0;
+    if ((c & 0xE0) == 0xC0) {
+        n = 1;
+        cp = c & 0x1F;
+    } else if ((c & 0xF0) == 0xE0) {
+        n = 2;
+        cp = c & 0x0F;
+    } else if ((c & 0xF8) == 0xF0) {
+        n = 3;
+        cp = c & 0x07;
+    } else {
+        i += 1;
+        return 0xFFFD;
+    }
+    if (i + 1 + n > s.size()) {
+        i += 1;
+        return 0xFFFD;
+    }
+    for (int k = 0; k < n; ++k) {
+        cp = (cp << 6) | (static_cast<unsigned char>(s[i + 1 + k]) & 0x3F);
+    }
+    i += 1 + n;
+    return cp;
+}
+
+class FontFace {
+public:
+    explicit FontFace(int sizePx) : FontFace("", sizePx) {}
+    // file 为空时使用默认字体（GDI 忽略 file 参数，用系统默认字体）
+    FontFace(const std::string& file, int sizePx) { init(file, sizePx); }
+    ~FontFace() { destroy(); }
+    FontFace(const FontFace&) = delete;
+    FontFace& operator=(const FontFace&) = delete;
+
+    int sizePx() const { return sizePx_; }
+    // 上升/下降（1/64 像素；descender 为负）
+    double ascender() const { return ascender_; }
+    double descender() const { return descender_; }
+
+    // 加载字形轮廓（缺字形返回空 outline）
+    Glyph loadGlyph(uint32_t cp) const;
+
+private:
+    void init(const std::string& file, int sizePx);
+    void destroy();
+
+#ifdef WBWOPENGAL_API_FONT_FREETYPE
+    FT_Library lib_ = nullptr;
+    FT_Face face_ = nullptr;
+#else
+    HDC dc_ = nullptr;
+    HFONT font_ = nullptr;
+#endif
+    int sizePx_ = 16;
+    double ascender_ = 0.0;
+    double descender_ = 0.0;
+};
+
 } // namespace detail
 
 // =====================================================================
@@ -367,6 +461,12 @@ struct Color {
     constexpr Color(float r_, float g_, float b_, float a_ = 1.0f)
         : r(r_), g(g_), b(b_), a(a_) {}
 };
+
+// =====================================================================
+// 文本布局枚举
+// =====================================================================
+enum class TextAlign { Left, Center, Right };
+enum class TextBaseline { Top, Middle, Alphabetic, Bottom };
 
 // 解析 CSS 颜色字符串:
 //   "#RGB" "#RRGGBB" "#RRGGBBAA" "rgb(r,g,b)" "rgba(r,g,b,a)" 及常用颜色名
@@ -493,6 +593,245 @@ inline Color parseColor(const std::string& css) {
     }
     throw std::invalid_argument("wbwopenglapi: 无法解析颜色: " + css);
 }
+
+// =====================================================================
+// FontFace 实现（inline 成员函数；GDI / FreeType 双后端）
+// =====================================================================
+
+namespace detail {
+
+// 默认字体文件候选（FreeType 用；GDI 后端忽略）
+static inline std::string defaultFontFile() {
+#ifdef _WIN32
+    const char* cands[] = {
+        "C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simsun.ttc",
+        "C:\\Windows\\Fonts\\arial.ttf", "C:\\Windows\\Fonts\\segoeui.ttf",
+    };
+#else
+    const char* cands[] = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    };
+#endif
+    for (const char* c : cands) {
+        std::ifstream f(c);
+        if (f.good()) {
+            return c;
+        }
+    }
+    return "";
+}
+
+inline void FontFace::init(const std::string& file, int sizePx) {
+    sizePx_ = sizePx;
+#ifdef WBWOPENGAL_API_FONT_FREETYPE
+    if (FT_Init_FreeType(&lib_) != 0) {
+        throw std::runtime_error("wbwopenglapi: FreeType 初始化失败");
+    }
+    std::string path = file;
+    if (path.empty()) {
+        path = defaultFontFile();
+    }
+    if (path.empty() || FT_New_Face(lib_, path.c_str(), 0, &face_) != 0) {
+        FT_Done_FreeType(lib_);
+        lib_ = nullptr;
+        throw std::runtime_error("wbwopenglapi: 无法加载字体文件 \"" + path + "\"");
+    }
+    if (FT_Set_Char_Size(face_, 0, sizePx * 64, 72, 72) != 0) {
+        destroy();
+        throw std::runtime_error("wbwopenglapi: 设置字号失败");
+    }
+    ascender_ = static_cast<double>(face_->size->metrics.ascender);
+    descender_ = static_cast<double>(face_->size->metrics.descender);
+#else
+    (void)file;
+    dc_ = CreateCompatibleDC(nullptr);
+    if (!dc_) {
+        throw std::runtime_error("wbwopenglapi: 创建字体 DC 失败");
+    }
+    const wchar_t* faces[] = {L"Segoe UI", L"Arial", L"Microsoft YaHei UI"};
+    for (const wchar_t* fn : faces) {
+        font_ = CreateFontW(-sizePx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_TT_ONLY_PRECIS,
+                            CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                            DEFAULT_PITCH | FF_DONTCARE, fn);
+        if (font_) {
+            break;
+        }
+    }
+    if (!font_) {
+        DeleteDC(dc_);
+        dc_ = nullptr;
+        throw std::runtime_error("wbwopenglapi: 创建字体失败");
+    }
+    SelectObject(dc_, font_);
+    SetMapMode(dc_, MM_TEXT);
+    OUTLINETEXTMETRICW otm = {};
+    if (GetOutlineTextMetricsW(dc_, sizeof(otm), &otm) != 0) {
+        ascender_ = static_cast<double>(otm.otmAscent) * 64.0;
+        descender_ = -static_cast<double>(otm.otmDescent) * 64.0;
+    }
+#endif
+}
+
+inline void FontFace::destroy() {
+#ifdef WBWOPENGAL_API_FONT_FREETYPE
+    if (face_) {
+        FT_Done_Face(face_);
+        face_ = nullptr;
+    }
+    if (lib_) {
+        FT_Done_FreeType(lib_);
+        lib_ = nullptr;
+    }
+#else
+    if (font_) {
+        DeleteObject(font_);
+        font_ = nullptr;
+    }
+    if (dc_) {
+        DeleteDC(dc_);
+        dc_ = nullptr;
+    }
+#endif
+}
+
+#ifdef WBWOPENGAL_API_FONT_FREETYPE
+
+// FT_Outline_Decompose 回调收集器
+struct OutlineToSegs {
+    std::vector<PathSeg>& out;
+    FT_Outline_Funcs cbs;
+    explicit OutlineToSegs(std::vector<PathSeg>& o) : out(o) {
+        cbs.move_to = &OutlineToSegs::moveTo;
+        cbs.line_to = &OutlineToSegs::lineTo;
+        cbs.conic_to = &OutlineToSegs::conicTo;
+        cbs.cubic_to = &OutlineToSegs::cubicTo;
+        cbs.shift = 0;
+        cbs.delta = 0;
+    }
+    static int moveTo(const FT_Vector* to, void* user) {
+        auto* s = static_cast<OutlineToSegs*>(user);
+        s->out.push_back({PathCmd::MoveTo, static_cast<float>(to->x),
+                          static_cast<float>(to->y)});
+        return 0;
+    }
+    static int lineTo(const FT_Vector* to, void* user) {
+        auto* s = static_cast<OutlineToSegs*>(user);
+        s->out.push_back({PathCmd::LineTo, static_cast<float>(to->x),
+                          static_cast<float>(to->y)});
+        return 0;
+    }
+    static int conicTo(const FT_Vector* c, const FT_Vector* to, void* user) {
+        auto* s = static_cast<OutlineToSegs*>(user);
+        s->out.push_back({PathCmd::QuadraticTo, static_cast<float>(c->x),
+                          static_cast<float>(c->y), static_cast<float>(to->x),
+                          static_cast<float>(to->y)});
+        return 0;
+    }
+    static int cubicTo(const FT_Vector* c1, const FT_Vector* c2,
+                       const FT_Vector* to, void* user) {
+        auto* s = static_cast<OutlineToSegs*>(user);
+        s->out.push_back({PathCmd::CubicTo, static_cast<float>(c1->x),
+                          static_cast<float>(c1->y), static_cast<float>(c2->x),
+                          static_cast<float>(c2->y), static_cast<float>(to->x),
+                          static_cast<float>(to->y)});
+        return 0;
+    }
+};
+
+inline Glyph FontFace::loadGlyph(uint32_t cp) const {
+    Glyph g;
+    FT_UInt idx = FT_Get_Char_Index(face_, cp);
+    if (idx == 0) {
+        return g;
+    }
+    if (FT_Load_Glyph(face_, idx, FT_LOAD_NO_BITMAP) != 0) {
+        return g;
+    }
+    FT_Outline* ol = &face_->glyph->outline;
+    if (ol->n_points > 0) {
+        OutlineToSegs conv(g.outline);
+        FT_Outline_Decompose(ol, &conv.cbs, &conv);
+    }
+    g.advanceX = static_cast<double>(face_->glyph->advance.x);
+    return g;
+}
+
+#else // GDI 后端
+
+// POINTFX 16.16 定点 -> 1/64 像素值（GDI 输出单位为像素，×64 与 FreeType 统一）
+static inline double pointFx(const POINTFX& p, bool y) {
+    const FIXED& f = y ? p.y : p.x;
+    return (static_cast<double>(f.value) + static_cast<double>(f.fract) / 65536.0) * 64.0;
+}
+
+inline Glyph FontFace::loadGlyph(uint32_t cp) const {
+    Glyph g;
+    GLYPHMETRICS gm = {};
+    MAT2 mat = {{0, 1}, {0, 0}, {0, 0}, {0, 1}}; // 恒等变换（1/64 像素单位）
+    const DWORD sz = GetGlyphOutlineW(dc_, static_cast<WCHAR>(cp), GGO_NATIVE,
+                                      &gm, 0, nullptr, &mat);
+    if (sz == GDI_ERROR) {
+        return g;
+    }
+    if (sz > 0) {
+        std::vector<BYTE> buf(sz);
+        if (GetGlyphOutlineW(dc_, static_cast<WCHAR>(cp), GGO_NATIVE, &gm,
+                             sz, buf.data(), &mat) == GDI_ERROR) {
+            return g;
+        }
+        const BYTE* end = buf.data() + buf.size();
+        const TTPOLYGONHEADER* hdr =
+            reinterpret_cast<const TTPOLYGONHEADER*>(buf.data());
+        while (reinterpret_cast<const BYTE*>(hdr) < end) {
+            g.outline.push_back({PathCmd::MoveTo,
+                                 static_cast<float>(pointFx(hdr->pfxStart, false)),
+                                 static_cast<float>(pointFx(hdr->pfxStart, true))});
+            const BYTE* p =
+                reinterpret_cast<const BYTE*>(hdr) + sizeof(TTPOLYGONHEADER);
+            const BYTE* hdrEnd = reinterpret_cast<const BYTE*>(hdr) + hdr->cb;
+            while (p < hdrEnd) {
+                const TTPOLYCURVE* curve = reinterpret_cast<const TTPOLYCURVE*>(p);
+                if (curve->wType == TT_PRIM_LINE) {
+                    for (DWORD i = 0; i < curve->cpfx; ++i) {
+                        g.outline.push_back({PathCmd::LineTo,
+                                             static_cast<float>(pointFx(curve->apfx[i], false)),
+                                             static_cast<float>(pointFx(curve->apfx[i], true))});
+                    }
+                } else if (curve->wType == TT_PRIM_QSPLINE) {
+                    DWORD i = 0;
+                    while (i + 1 < curve->cpfx) {
+                        g.outline.push_back({PathCmd::QuadraticTo,
+                                             static_cast<float>(pointFx(curve->apfx[i], false)),
+                                             static_cast<float>(pointFx(curve->apfx[i], true)),
+                                             static_cast<float>(pointFx(curve->apfx[i + 1], false)),
+                                             static_cast<float>(pointFx(curve->apfx[i + 1], true))});
+                        i += 2;
+                    }
+                    if (i < curve->cpfx) { // 剩余 1 点：控制点=终点
+                        g.outline.push_back({PathCmd::QuadraticTo,
+                                             static_cast<float>(pointFx(curve->apfx[i], false)),
+                                             static_cast<float>(pointFx(curve->apfx[i], true)),
+                                             static_cast<float>(pointFx(curve->apfx[i], false)),
+                                             static_cast<float>(pointFx(curve->apfx[i], true))});
+                    }
+                }
+                p += sizeof(TTPOLYCURVE) - sizeof(POINTFX) +
+                     curve->cpfx * sizeof(POINTFX);
+            }
+            hdr = reinterpret_cast<const TTPOLYGONHEADER*>(hdrEnd);
+        }
+    }
+    g.advanceX = static_cast<double>(gm.gmCellIncX) * 64.0;
+    return g;
+}
+
+#endif // WBWOPENGAL_API_FONT_FREETYPE
+
+} // namespace detail
 
 namespace detail {
 struct GlfwLife {
@@ -832,62 +1171,74 @@ public:
     }
 
     // 用 fillStyle 填充当前路径（stencil even-odd 两遍法）
-    void fill() {
-        const std::vector<detail::SubPath> subs = detail::flattenPath(path_);
-        bool hasShape = false;
-        for (const detail::SubPath& sub : subs) {
-            if (sub.points.size() >= 3) {
-                hasShape = true;
-                break;
-            }
-        }
-        if (!hasShape) {
-            return;
-        }
-        // Pass 1: 轮廓三角扇写入 stencil（GL_INVERT -> even-odd）
-        glEnable(GL_STENCIL_TEST);
-        glStencilMask(0xFF);
-        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-        glStencilFunc(GL_ALWAYS, 0, 0xFF);
-        glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
-        for (const detail::SubPath& sub : subs) {
-            const size_t n = sub.points.size();
-            if (n < 3) {
-                continue;
-            }
-            const detail::Vec2& p0 = sub.points[0];
-            for (size_t i = 1; i + 1 < n; ++i) {
-                const detail::Vec2 tris[3] = {p0, sub.points[i],
-                                              sub.points[i + 1]};
-                drawSolid(fillStyle_, tris, 3);
-            }
-        }
-        // Pass 2: stencil 非零区域上色（单位矩阵 + NDC 全屏四边形）
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
-        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        const detail::Vec2 quad[6] = {
-            {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f},
-            {-1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f},
-        };
-        drawSolid(fillStyle_, quad, 6, kIdentity);
-        glDisable(GL_STENCIL_TEST);
-        glClear(GL_STENCIL_BUFFER_BIT);
-    }
+    void fill() { fillOutline(path_, fillStyle_); }
 
     // 用 strokeStyle/lineWidth 描边当前路径（复用粗线三角带）
-    void stroke() {
-        const std::vector<detail::SubPath> subs = detail::flattenPath(path_);
-        for (const detail::SubPath& sub : subs) {
-            if (sub.points.size() < 2) {
-                continue;
-            }
-            std::vector<detail::Vec2> strip = detail::buildStrokeStrip(
-                sub.points, sub.closed, static_cast<float>(lineWidth_));
-            if (!strip.empty()) {
-                drawSolid(strokeStyle_, strip.data(), strip.size());
+    void stroke() { strokeOutline(path_, strokeStyle_); }
+
+    // ---------------- 文本（矢量轮廓） ----------------
+
+    // 设置字体: "16px sans-serif"（取字号，字体名忽略）或字体文件路径
+    // （FreeType 后端用文件路径或默认字体；GDI 后端始终用系统默认字体）
+    void font(const std::string& css) {
+        std::string s = css;
+        size_t b = s.find_first_not_of(" \t\r\n");
+        size_t e = s.find_last_not_of(" \t\r\n");
+        if (b == std::string::npos) {
+            return;
+        }
+        s = s.substr(b, e - b + 1);
+        std::string file;
+        int size = 16;
+        if (s.find('/') != std::string::npos || s.find('\\') != std::string::npos ||
+            s.find(".ttf") != std::string::npos || s.find(".otf") != std::string::npos ||
+            s.find(".ttc") != std::string::npos) {
+            file = s;
+        } else {
+            const size_t p = s.find("px");
+            if (p != std::string::npos) {
+                size_t b2 = p;
+                while (b2 > 0) {
+                    const char c = s[b2 - 1];
+                    if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') {
+                        --b2;
+                    } else {
+                        break;
+                    }
+                }
+                if (b2 < p) {
+                    size = static_cast<int>(std::strtod(s.substr(b2, p - b2).c_str(), nullptr));
+                    if (size <= 0) {
+                        size = 16;
+                    }
+                }
             }
         }
+        if (!fontFace_ || fontFace_->sizePx() != size) {
+            fontFace_ = std::make_unique<detail::FontFace>(file, size);
+            glyphCache_.clear();
+        }
+    }
+
+    void textAlign(TextAlign a) { textAlign_ = a; }
+    void textBaseline(TextBaseline b) { textBaseline_ = b; }
+
+    void fillText(const std::string& text, double x, double y, double maxWidth = 0) {
+        drawText(text, x, y, maxWidth, true);
+    }
+
+    void strokeText(const std::string& text, double x, double y, double maxWidth = 0) {
+        drawText(text, x, y, maxWidth, false);
+    }
+
+    // 文本宽度（像素）
+    double measureText(const std::string& text) const {
+        double total = 0.0;
+        size_t i = 0;
+        while (i < text.size()) {
+            total += glyph(detail::utf8Next(text, i)).advanceX;
+        }
+        return total / 64.0;
     }
 
 private:
@@ -965,6 +1316,147 @@ void main() {
         glBindVertexArray(0);
     }
 
+    // stencil even-odd 两遍填充任意路径命令序列
+    void fillOutline(const std::vector<detail::PathSeg>& segs, const Color& c) {
+        const std::vector<detail::SubPath> subs = detail::flattenPath(segs);
+        bool hasShape = false;
+        for (const detail::SubPath& sub : subs) {
+            if (sub.points.size() >= 3) {
+                hasShape = true;
+                break;
+            }
+        }
+        if (!hasShape) {
+            return;
+        }
+        // Pass 1: 轮廓三角扇写入 stencil（GL_INVERT -> even-odd）
+        glEnable(GL_STENCIL_TEST);
+        glStencilMask(0xFF);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
+        for (const detail::SubPath& sub : subs) {
+            const size_t n = sub.points.size();
+            if (n < 3) {
+                continue;
+            }
+            const detail::Vec2& p0 = sub.points[0];
+            for (size_t i = 1; i + 1 < n; ++i) {
+                const detail::Vec2 tris[3] = {p0, sub.points[i],
+                                              sub.points[i + 1]};
+                drawSolid(c, tris, 3);
+            }
+        }
+        // Pass 2: stencil 非零区域上色（单位矩阵 + NDC 全屏四边形）
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        const detail::Vec2 quad[6] = {
+            {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f},
+            {-1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f},
+        };
+        drawSolid(c, quad, 6, kIdentity);
+        glDisable(GL_STENCIL_TEST);
+        glClear(GL_STENCIL_BUFFER_BIT);
+    }
+
+    // 粗线描边任意路径命令序列（逐子路径）
+    void strokeOutline(const std::vector<detail::PathSeg>& segs, const Color& c) {
+        const std::vector<detail::SubPath> subs = detail::flattenPath(segs);
+        for (const detail::SubPath& sub : subs) {
+            if (sub.points.size() < 2) {
+                continue;
+            }
+            std::vector<detail::Vec2> strip = detail::buildStrokeStrip(
+                sub.points, sub.closed, static_cast<float>(lineWidth_));
+            if (!strip.empty()) {
+                drawSolid(c, strip.data(), strip.size());
+            }
+        }
+    }
+
+    // 加载并缓存字形（键为码点；font() 改变字号时清缓存）
+    detail::Glyph glyph(uint32_t cp) const {
+        auto it = glyphCache_.find(cp);
+        if (it != glyphCache_.end()) {
+            return it->second;
+        }
+        detail::Glyph g;
+        if (fontFace_) {
+            g = fontFace_->loadGlyph(cp);
+        }
+        glyphCache_.emplace(cp, g);
+        return g;
+    }
+
+    // 文本对齐偏移（像素）
+    double alignOffset(double w) const {
+        switch (textAlign_) {
+        case TextAlign::Center:
+            return w / 2.0;
+        case TextAlign::Right:
+            return w;
+        default:
+            return 0.0;
+        }
+    }
+
+    // 文本基线到字形基线的偏移（像素；字形基线即 fillText 的 y 参数）
+    double baselineOffset() const {
+        const double asc = fontFace_ ? fontFace_->ascender() / 64.0 : 0.0;
+        const double desc = fontFace_ ? fontFace_->descender() / 64.0 : 0.0; // 负
+        switch (textBaseline_) {
+        case TextBaseline::Top:
+            return asc;
+        case TextBaseline::Middle:
+            return (asc + desc) / 2.0;
+        case TextBaseline::Bottom:
+            return desc;
+        default: // Alphabetic
+            return 0.0;
+        }
+    }
+
+    // 文本绘制（fill=true 用 fillStyle，否则 strokeStyle/lineWidth）
+    void drawText(const std::string& text, double x, double y, double maxWidth,
+                  bool fill) {
+        if (!fontFace_) {
+            font("");
+        }
+        const double total = measureText(text);
+        double scale = 1.0;
+        if (maxWidth > 0.0 && total > maxWidth) {
+            scale = maxWidth / total; // Canvas 语义: 超宽压缩
+        }
+        const double tx = x - alignOffset(total * scale);
+        const double ty = y + baselineOffset();
+        double cur = 0.0;
+        size_t i = 0;
+        while (i < text.size()) {
+            const detail::Glyph g = glyph(detail::utf8Next(text, i));
+            if (!g.outline.empty()) {
+                std::vector<detail::PathSeg> segs;
+                segs.reserve(g.outline.size());
+                for (const detail::PathSeg& s : g.outline) {
+                    detail::PathSeg t = s;
+                    t.x1 = static_cast<float>(tx + s.x1 * scale / 64.0);
+                    t.y1 = static_cast<float>(ty - s.y1 * scale / 64.0);
+                    t.x2 = static_cast<float>(tx + s.x2 * scale / 64.0);
+                    t.y2 = static_cast<float>(ty - s.y2 * scale / 64.0);
+                    t.x3 = static_cast<float>(tx + s.x3 * scale / 64.0);
+                    t.y3 = static_cast<float>(ty - s.y3 * scale / 64.0);
+                    segs.push_back(t);
+                }
+                if (fill) {
+                    fillOutline(segs, fillStyle_);
+                } else {
+                    strokeOutline(segs, strokeStyle_);
+                }
+            }
+            cur += g.advanceX;
+        }
+    }
+
     Window& window_;
     std::unique_ptr<detail::Program> program_;
     std::unique_ptr<detail::VertexArray> vao_;
@@ -980,6 +1472,11 @@ void main() {
 
     std::vector<detail::PathSeg> path_;
     int subPathPoints_ = 0; // 当前子路径点数（arc 自动连线判断）
+
+    std::unique_ptr<detail::FontFace> fontFace_;
+    mutable std::unordered_map<uint32_t, detail::Glyph> glyphCache_;
+    TextAlign textAlign_ = TextAlign::Left;
+    TextBaseline textBaseline_ = TextBaseline::Alphabetic;
 };
 
 } // namespace wbwopenglapi
