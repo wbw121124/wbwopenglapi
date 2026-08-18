@@ -16,7 +16,34 @@
   - 注意事项：build.ps1 默认后端 auto（freetype 优先），全量构建时额外编译
     03_text_gdi.exe 验证 GDI 路径；DLL（glfw3.dll/libfreetype-6.dll）自动拷贝到 build/。
   - 待解决：剩余阶段（矩形/路径/文本/变换/图像/示例/文档）。
-- [ ] 阶段 3 基础矩形：渲染管线 + fillRect / strokeRect / clearRect
+- [x] 阶段 3 基础矩形：渲染管线 + fillRect / strokeRect / clearRect（2026-08-18）
+  - 阶段目标：GLSL 330 solid 着色器程序（内嵌源码）；GLShader/GLProgram/GLVAO/GLVBO
+    RAII 封装；正交投影（左上原点、y 向下、framebuffer 尺寸、HiDPI 兼容）；
+    CSS 颜色解析（#RGB/#RRGGBB/#RRGGBBAA/rgb()/rgba()/常用颜色名）；样式状态
+    （fillStyle/strokeStyle/lineWidth/globalAlpha，默认值对齐 Canvas 2D）；
+    fillRect/strokeRect/clearRect；CPU 粗线三角带生成器（butt 端点 + miter/bevel
+    连接，core profile 合规，阶段 4 的 stroke() 复用）；clearRect 用 scissor+透明清屏
+    （注意 scissor y 轴方向与逻辑/物理像素换算）。
+  - 完成情况：全部达成。02_shapes 双后端（gdi/freetype）测试模式 9/9 像素校验通过
+    （退出码 0）。测试点含 top-left 光栅化边界与 alpha 重叠的修正说明。
+  - 上下文变更（排障记录，重要）：
+    1. **矩阵布局坑**：投影矩阵数组若按"行主序"排列传给 GLSL mat3（列主序），
+       平移项会落在第三行被 vec3 乘法丢弃，顶点全部挤在单点画不出。
+       实测 Intel UHD 630（Build 27.20.100.9168）上 glGetUniformfv 读回的是
+       原始字节（看起来"正确"），但渲染结果已错——不可用读回验证语义。
+       最终方案：**CPU 端变换顶点到 NDC，shader 直写 gl_Position**，不再使用
+       mat3 uniform；proj_ 矩阵按列主序存储（col0=(2/fw,0,0) col1=(0,-2/fh,0)
+       col2=(-1,1,1)），与阶段 6 的 CPU 矩阵栈设计一致。
+    2. **GL_FLOAT attribute 大数值读取异常**（同驱动）：顶点值 >~1（如像素坐标
+       40/200）时部分 draw 无输出，NDC 小数（-1..1）正常。CPU 变换后属性恒为
+       小数，天然规避；已写入 kSolidVS 注释。
+    3. **GL top-left 光栅化规则**：奇数像素宽边框（如线宽 1）的任何整数坐标点，
+       像素中心恰在边缘会被排除；测试用偶数线宽 + 边框内部点。
+    4. **半透明重叠**：globalAlpha 0.3 与 0.6 的两个矩形重叠区像素是两次混合的
+       结果（实测 (251,67,67) 与理论一致），测试点避开重叠区。
+    5. VertexBuffer::upload 采用首次 glBufferData + 后续 glBufferSubData
+       （容量不足才重分配），避免重复重分配。
+  - 待解决：剩余阶段（路径/文本/变换/图像/示例/文档）。
 - [ ] 阶段 4 路径系统：fill(stencil) / stroke(粗线) / arc / 贝塞尔
 - [ ] 阶段 5 矢量文本：GDI / FreeType 双后端
 - [ ] 阶段 6 进阶：变换矩阵栈 + drawImage / BMP
