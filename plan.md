@@ -57,6 +57,36 @@
     mat 参数（nullptr=proj_，否则列主序矩阵，单位矩阵 kIdentity）；新增
     rect() 路径方法（补充进 API 清单）。
   - 待解决：剩余阶段（文本/变换/图像/示例/文档）。
+- [x] 阶段 5 矢量文本：GDI / FreeType 双后端（2026-08-18）
+  - 阶段目标：font()（"NNpx" 或字体文件路径）/ textAlign / textBaseline /
+    fillText / strokeText / measureText；Glyph 缓存；字形轮廓与用户路径共用
+    fill/stroke 管线（fill 重构为 fillOutline，stroke 重构为 strokeOutline）；
+    默认字体候选表（Windows msyh.ttc/simsun.ttc/arial.ttf/segoeui.ttf，
+    Linux DejaVuSans/LiberationSans 等）；统一字形空间：1/64 像素、y 向上、
+    基线 y=0，画布坐标 = (tx + px*scale/64, ty - py*scale/64)。
+  - 完成情况：全部达成。05_text 双后端（gdi/freetype）测试模式 5/5 像素校验
+    通过（退出码 0），覆盖：fillText 方块字符 U+2588、fillText 实心圆 U+25CF、
+    strokeText（线宽 8）、中文"中"、背景。02_shapes / 04_path 回归通过。
+  - 上下文变更（排障记录，重要）：
+    1. **GDI/FreeType 字形单位不一致**：GetGlyphOutlineW（MM_TEXT）输出单位是
+       像素，FreeType 输出 1/64 像素。GDI 侧坐标与 advance 必须 ×64 统一，
+       否则字形缩小 64 倍不可见（首版全 FAIL 的根因）。
+    2. **GDI y 方向**：GGO_NATIVE 输出 y 向上为正（与画布 y 向下相反），
+       画布 y = ty - py/64 直接翻转；ascender/descender 取自 OUTLINETEXTMETRICW
+       otmAscent/otmDescent（×64，descender 取负）。
+    3. **GDI 字形坐标经 hinting 可能略超 ascender/descender 范围**（如 U+2588
+       y ∈ [-24, 73] vs asc 70），测试点选字形内部深处避免边缘。
+    4. **MAT2 初始化格式**：`MAT2 mat = {{0,1},{0,0},{0,0},{0,1}}`（4 个 FIXED
+       平铺），不能按 2×2 分组。
+    5. **GDI font linking**：中文字符经字体链接 fallback（Segoe UI -> msyh），
+       GetGlyphOutlineW 按需取用链接字体，坐标体系不变，无需特殊处理。
+    6. FreeType 后端：FT_Set_Char_Size(0, size*64, 72, 72) 得到像素字号；
+       ascender/descender 取 face_->size->metrics；advance 用
+       face_->glyph->advance.x（1/64 像素）。
+    7. TextAlign/TextBaseline 枚举放顶层命名空间；font() 解析 "NNpx" 前缀
+       （字号 ≤0 回退 16px），含 .ttf/.otf/.ttc 或路径分隔符视为文件路径
+       （GDI 后端忽略文件名，始终用系统字体）。
+  - 待解决：剩余阶段（变换/图像/示例/文档）。
 - [ ] 阶段 4 路径系统：fill(stencil) / stroke(粗线) / arc / 贝塞尔
 - [ ] 阶段 5 矢量文本：GDI / FreeType 双后端
 - [ ] 阶段 6 进阶：变换矩阵栈 + drawImage / BMP
