@@ -3,7 +3,19 @@
 ## 当前进度
 
 - [x] 阶段 1 设计：本文件定稿（2026-08-18）
-- [ ] 阶段 2 骨架：目录结构、依赖获取脚本、构建脚本、CMakeLists、Window RAII
+- [x] 阶段 2 骨架（2026-08-18）
+  - 阶段目标：git init 完成；建立 include/ examples/ scripts/ 目录；fetch_deps.ps1 下载
+    GLFW/GLAD/FreeType 到 third_party/；build.ps1 一键编译示例；CMakeLists.txt 跨平台；
+    wbwopenglapi.hpp 实现 Window RAII + 输入轮询 + GL 版本校验 + 最小 clear。
+  - 完成情况：全部达成。01_hello 双后端（freetype/gdi）编译通过并运行验证
+    （GL 3.3.0 / Intel UHD 630 / 退出码 0）。
+  - 上下文变更：GLAD 用 glad2（glad.sh 已迁移到 gen.glad.sh，POST /generate 需 302
+    后自动转 GET，禁用 -X POST 否则 405）；glad2 生成文件为 src/gl.c（无实现宏）。
+    FreeType 2.14.3 取自 msys2 仓库（zstd 解压）；GLFW 3.4 取自 ghfast.top 代理。
+    include 顺序：GLAD 在 GLFW 之前 + GLFW_INCLUDE_NONE（防止系统 GL/gl.h 冲突）。
+  - 注意事项：build.ps1 默认后端 auto（freetype 优先），全量构建时额外编译
+    03_text_gdi.exe 验证 GDI 路径；DLL（glfw3.dll/libfreetype-6.dll）自动拷贝到 build/。
+  - 待解决：剩余阶段（矩形/路径/文本/变换/图像/示例/文档）。
 - [ ] 阶段 3 基础矩形：渲染管线 + fillRect / strokeRect / clearRect
 - [ ] 阶段 4 路径系统：fill(stencil) / stroke(粗线) / arc / 贝塞尔
 - [ ] 阶段 5 矢量文本：GDI / FreeType 双后端
@@ -214,7 +226,9 @@ stb_image 等图像库（BMP 解码纯标准库实现，量小可控）；glm（
 
 ## 待解决问题（随阶段更新）
 
-- [ ] GLAD 生成服务的 POST API 实测（阶段 2）
-- [ ] msys2 镜像下载 FreeType 包 + zstd 解压链路实测（阶段 2，失败则降级：仅验证 GDI）
-- [ ] 本机显卡 GL 3.3 支持实测（阶段 2）
+- [x] GLAD 生成服务的 POST API 实测（阶段 2）：成功。端点 gen.glad.sh/generate，
+      字段 generator=c/specification=gl/api=gl=3.3/profile=gl=core/language=c/extensions=none/output=glad.zip；
+      302 跟随须自动转 GET（禁用 -X POST，否则 405）。
+- [x] msys2 镜像下载 FreeType 包 + zstd 解压链路实测（阶段 2）：成功（2.14.3-1）。
+- [x] 本机显卡 GL 3.3 支持实测（阶段 2）：成功（Intel UHD 630，GL 3.3.0）。
 - [ ] Linux 全流程需真实 Linux 环境验证（本机仅能验证 FreeType 后端的 MinGW 编译路径）
