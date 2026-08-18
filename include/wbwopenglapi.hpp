@@ -48,6 +48,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -171,6 +172,32 @@ public:
 private:
     GLuint id_ = 0;
     GLsizeiptr capacity_ = 0;
+};
+
+class Texture {
+public:
+    Texture() { glGenTextures(1, &id_); }
+    ~Texture() {
+        if (id_) {
+            glDeleteTextures(1, &id_);
+        }
+    }
+    Texture(const Texture&) = delete;
+    Texture& operator=(const Texture&) = delete;
+    void bind() const { glBindTexture(GL_TEXTURE_2D, id_); }
+    // 上传 RGBA8 图像（行序自上而下；GL 纹素原点在左下，采样时 v 翻转）
+    void upload(int w, int h, const uint8_t* px) {
+        bind();
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, px);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
+private:
+    GLuint id_ = 0;
 };
 
 // =====================================================================
@@ -595,6 +622,87 @@ inline Color parseColor(const std::string& css) {
 }
 
 // =====================================================================
+// Image - 位图图像（RGBA，行序自上而下）与纯标准库 BMP 解码
+// =====================================================================
+struct Image {
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> rgba; // width * height * 4
+};
+
+// 解码未压缩 BMP（24/32 位，BI_RGB）。行序统一转为自上而下。
+// 解码失败抛出 std::runtime_error。
+inline Image loadBMP(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        throw std::runtime_error("wbwopenglapi: 无法打开图像: " + path);
+    }
+    auto readU16 = [&f]() -> uint16_t {
+        uint16_t v = 0;
+        for (int i = 0; i < 2; ++i) {
+            v |= static_cast<uint16_t>(f.get()) << (8 * i);
+        }
+        return v;
+    };
+    auto readU32 = [&f]() -> uint32_t {
+        uint32_t v = 0;
+        for (int i = 0; i < 4; ++i) {
+            v |= static_cast<uint32_t>(f.get()) << (8 * i);
+        }
+        return v;
+    };
+    auto readS32 = [&f, &readU32]() -> int32_t {
+        return static_cast<int32_t>(readU32());
+    };
+
+    if (readU16() != 0x4D42) { // "BM"
+        throw std::runtime_error("wbwopenglapi: 不是 BMP 文件: " + path);
+    }
+    readU32();               // bfSize
+    readU32();               // bfReserved
+    const uint32_t off = readU32(); // bfOffBits
+    const uint32_t hdr = readU32(); // biSize
+    if (hdr < 40) {
+        throw std::runtime_error("wbwopenglapi: 不支持的 BMP 头: " + path);
+    }
+    const int32_t w = readS32();
+    const int32_t hRaw = readS32();
+    readU16();               // biPlanes
+    const uint16_t bpp = readU16();
+    const uint32_t comp = readU32();
+    if (w <= 0 || hRaw == 0) {
+        throw std::runtime_error("wbwopenglapi: BMP 尺寸非法: " + path);
+    }
+    if (comp != 0) {
+        throw std::runtime_error("wbwopenglapi: 仅支持未压缩(BI_RGB) BMP: " + path);
+    }
+    if (bpp != 24 && bpp != 32) {
+        throw std::runtime_error("wbwopenglapi: 仅支持 24/32 位 BMP: " + path);
+    }
+    Image img;
+    img.width = w;
+    img.height = (hRaw < 0) ? -hRaw : hRaw;
+    img.rgba.reserve(static_cast<size_t>(img.width) * img.height * 4);
+    const int bytesPerPx = bpp / 8;
+    const int rowBytes = ((w * bpp + 31) / 32) * 4;
+    const bool topDown = hRaw < 0; // 负高度: 行序自上而下
+    std::vector<uint8_t> row(rowBytes);
+    for (int y = 0; y < img.height; ++y) {
+        const int srcY = topDown ? y : img.height - 1 - y;
+        f.seekg(static_cast<std::streamoff>(off) + static_cast<long long>(srcY) * rowBytes);
+        f.read(reinterpret_cast<char*>(row.data()), rowBytes);
+        for (int x = 0; x < img.width; ++x) {
+            const uint8_t* p = row.data() + x * bytesPerPx;
+            img.rgba.push_back(p[2]); // BGR(A) -> RGBA
+            img.rgba.push_back(p[1]);
+            img.rgba.push_back(p[0]);
+            img.rgba.push_back(bpp == 32 ? p[3] : 255);
+        }
+    }
+    return img;
+}
+
+// =====================================================================
 // FontFace 实现（inline 成员函数；GDI / FreeType 双后端）
 // =====================================================================
 
@@ -978,6 +1086,26 @@ public:
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(detail::Vec2),
                               reinterpret_cast<void*>(0));
         glBindVertexArray(0);
+
+        // 纹理通道（drawImage）
+        texProgram_ = std::make_unique<detail::Program>(kTexVS, kTexFS);
+        texVao_ = std::make_unique<detail::VertexArray>();
+        texVbo_ = std::make_unique<detail::VertexBuffer>();
+        tex_ = std::make_unique<detail::Texture>();
+        texVao_->bind();
+        texVbo_->bind();
+        const size_t stride = sizeof(TexVertex);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+                              static_cast<GLsizei>(stride),
+                              reinterpret_cast<void*>(0));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
+                              static_cast<GLsizei>(stride),
+                              reinterpret_cast<void*>(2 * sizeof(float)));
+        glBindVertexArray(0);
+
+        resetTransform();
     }
 
     // 清屏（Canvas 无背景概念，此为便捷扩展）
@@ -1214,9 +1342,10 @@ public:
                 }
             }
         }
-        if (!fontFace_ || fontFace_->sizePx() != size) {
+        if (!fontFace_ || fontCss_ != s) {
             fontFace_ = std::make_unique<detail::FontFace>(file, size);
             glyphCache_.clear();
+            fontCss_ = s;
         }
     }
 
@@ -1241,7 +1370,143 @@ public:
         return total / 64.0;
     }
 
+    // ---------------- 变换（Canvas 语义：后调用的变换先应用） ----------------
+
+    void translate(double dx, double dy) {
+        const float t[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                            static_cast<float>(dx), static_cast<float>(dy), 1.0f};
+        multiplyCurrent(t);
+    }
+
+    // 弧度，顺时针（y 向下坐标系下的标准旋转矩阵）
+    void rotate(double rad) {
+        const float c = static_cast<float>(std::cos(rad));
+        const float s = static_cast<float>(std::sin(rad));
+        const float r[9] = {c, s, 0.0f, -s, c, 0.0f, 0.0f, 0.0f, 1.0f};
+        multiplyCurrent(r);
+    }
+
+    // 恢复单位矩阵（仅变换，样式不变）
+    void resetTransform() {
+        for (int i = 0; i < 9; ++i) {
+            current_[i] = 0.0f;
+        }
+        current_[0] = current_[4] = current_[8] = 1.0f;
+    }
+
+    // 压栈：变换矩阵 + 全部样式状态
+    void save() {
+        StackEntry e;
+        std::memcpy(e.m, current_, sizeof(current_));
+        e.fillStyle = fillStyle_;
+        e.strokeStyle = strokeStyle_;
+        e.lineWidth = lineWidth_;
+        e.globalAlpha = globalAlpha_;
+        e.textAlign = textAlign_;
+        e.textBaseline = textBaseline_;
+        e.fontCss = fontCss_;
+        stack_.push_back(e);
+    }
+
+    // 出栈恢复；无对应 save() 时抛出 std::runtime_error
+    void restore() {
+        if (stack_.empty()) {
+            throw std::runtime_error("wbwopenglapi: restore() 无对应 save()");
+        }
+        const StackEntry e = stack_.back();
+        stack_.pop_back();
+        std::memcpy(current_, e.m, sizeof(current_));
+        fillStyle_ = e.fillStyle;
+        strokeStyle_ = e.strokeStyle;
+        lineWidth_ = e.lineWidth;
+        globalAlpha_ = e.globalAlpha;
+        textAlign_ = e.textAlign;
+        textBaseline_ = e.textBaseline;
+        if (fontCss_ != e.fontCss) {
+            font(e.fontCss);
+        }
+    }
+
+    // ---------------- 图像 ----------------
+
+    // 绘制图像；w/h 为 0 时按原尺寸（Canvas 语义）
+    void drawImage(const Image& img, double x, double y, double w = 0, double h = 0) {
+        if (img.width <= 0 || img.height <= 0 ||
+            img.rgba.size() < static_cast<size_t>(img.width) * img.height * 4) {
+            return;
+        }
+        const double dw = w > 0 ? w : static_cast<double>(img.width);
+        const double dh = h > 0 ? h : static_cast<double>(img.height);
+        // 图像行 0 = 顶行，位于纹理数据首行 = GL 纹理坐标 v=0（纹素原点在左下）。
+        // 故画布顶（图像顶）对应 v=0，画布底对应 v=1。
+        struct TexV {
+            float px, py, u, v;
+        };
+        const TexV src[6] = {
+            {static_cast<float>(x), static_cast<float>(y), 0.0f, 0.0f},
+            {static_cast<float>(x + dw), static_cast<float>(y), 1.0f, 0.0f},
+            {static_cast<float>(x + dw), static_cast<float>(y + dh), 1.0f, 1.0f},
+            {static_cast<float>(x), static_cast<float>(y), 0.0f, 0.0f},
+            {static_cast<float>(x + dw), static_cast<float>(y + dh), 1.0f, 1.0f},
+            {static_cast<float>(x), static_cast<float>(y + dh), 0.0f, 1.0f},
+        };
+        // 像素坐标 -> NDC（proj_ * current_）
+        float m[9];
+        matMul(proj_, current_, m);
+        TexV ndc[6];
+        for (int i = 0; i < 6; ++i) {
+            ndc[i] = src[i];
+            ndc[i].px = m[0] * src[i].px + m[3] * src[i].py + m[6];
+            ndc[i].py = m[1] * src[i].px + m[4] * src[i].py + m[7];
+        }
+        texProgram_->use();
+        glUniform4f(texProgram_->uniform("u_color"), 1.0f, 1.0f, 1.0f,
+                    static_cast<float>(globalAlpha_));
+        glActiveTexture(GL_TEXTURE0);
+        tex_->upload(img.width, img.height, img.rgba.data());
+        glUniform1i(texProgram_->uniform("u_tex"), 0);
+        texVao_->bind();
+        texVbo_->upload(ndc, static_cast<GLsizeiptr>(sizeof(ndc)));
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindVertexArray(0);
+    }
+
 private:
+    // 纹理通道顶点（pos + uv 交错）
+    struct TexVertex {
+        float px, py, u, v;
+    };
+
+    // save() 保存的完整状态（变换 + 样式）
+    struct StackEntry {
+        float m[9];
+        Color fillStyle;
+        Color strokeStyle;
+        double lineWidth = 1.0;
+        double globalAlpha = 1.0;
+        TextAlign textAlign = TextAlign::Left;
+        TextBaseline textBaseline = TextBaseline::Alphabetic;
+        std::string fontCss;
+    };
+
+    // 列主序 mat3 乘法: out = a * b
+    static void matMul(const float* a, const float* b, float* out) {
+        for (int cc = 0; cc < 3; ++cc) {
+            for (int rr = 0; rr < 3; ++rr) {
+                out[cc * 3 + rr] = a[0 * 3 + rr] * b[cc * 3 + 0] +
+                                   a[1 * 3 + rr] * b[cc * 3 + 1] +
+                                   a[2 * 3 + rr] * b[cc * 3 + 2];
+            }
+        }
+    }
+
+    // current_ = current_ * b（右乘：后调用的变换先应用）
+    void multiplyCurrent(const float* b) {
+        float out[9];
+        matMul(current_, b, out);
+        std::memcpy(current_, out, sizeof(out));
+    }
+
     // solid 通道着色器（阶段 5 增加纹理通道）。
     // 顶点在 CPU 端已变换为 NDC（-1..1），shader 直写：
     // 该驱动（Intel UHD 630 Build 27.20.100.9168）对 GL_FLOAT attribute
@@ -1260,6 +1525,28 @@ uniform vec4 u_color;
 out vec4 frag;
 void main() {
     frag = u_color;
+}
+)GLSL";
+
+    // 纹理通道着色器（drawImage；uv 由 CPU 端按图像行序翻转）
+    static constexpr const char* kTexVS = R"GLSL(
+#version 330 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+out vec2 v_uv;
+void main() {
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+    v_uv = a_uv;
+}
+)GLSL";
+    static constexpr const char* kTexFS = R"GLSL(
+#version 330 core
+uniform sampler2D u_tex;
+uniform vec4 u_color;
+in vec2 v_uv;
+out vec4 frag;
+void main() {
+    frag = texture(u_tex, v_uv) * u_color;
 }
 )GLSL";
 
@@ -1301,7 +1588,14 @@ void main() {
     // 否则使用给定矩阵（列主序 mat3，如 fill() 的全屏四边形用单位矩阵）。
     void drawSolid(const Color& c, const detail::Vec2* verts, size_t count,
                    const float* mat = nullptr) {
-        const float* m = mat ? mat : proj_;
+        // mat 非空 = NDC 空间直写（如 stencil 全屏 quad），不受当前变换影响；
+        // mat 为空 = 像素空间，顶点经当前变换（current_）后再投影（proj_）。
+        float m[9];
+        if (mat) {
+            std::memcpy(m, mat, sizeof(m));
+        } else {
+            matMul(proj_, current_, m); // m = proj_ * current_
+        }
         std::vector<detail::Vec2> ndc(count);
         for (size_t i = 0; i < count; ++i) {
             ndc[i].x = m[0] * verts[i].x + m[3] * verts[i].y + m[6];
@@ -1465,6 +1759,16 @@ void main() {
     // 单位矩阵（列主序），用于已处于 NDC 空间的顶点（fill 的全屏四边形）
     static constexpr float kIdentity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 
+    // 当前变换（列主序 3x3 仿射，像素坐标空间；初始单位矩阵）
+    float current_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    std::vector<StackEntry> stack_;
+
+    // 纹理通道（drawImage）
+    std::unique_ptr<detail::Program> texProgram_;
+    std::unique_ptr<detail::VertexArray> texVao_;
+    std::unique_ptr<detail::VertexBuffer> texVbo_;
+    std::unique_ptr<detail::Texture> tex_;
+
     Color fillStyle_{0.0f, 0.0f, 0.0f, 1.0f};
     Color strokeStyle_{0.0f, 0.0f, 0.0f, 1.0f};
     double lineWidth_ = 1.0;
@@ -1477,6 +1781,7 @@ void main() {
     mutable std::unordered_map<uint32_t, detail::Glyph> glyphCache_;
     TextAlign textAlign_ = TextAlign::Left;
     TextBaseline textBaseline_ = TextBaseline::Alphabetic;
+    std::string fontCss_;
 };
 
 } // namespace wbwopenglapi
