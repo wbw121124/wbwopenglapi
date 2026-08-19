@@ -1,0 +1,48 @@
+# skia-ci.yml - Skia 可选后端集成验证（软件栅格化, 无窗口）
+#   触发：推送 main 或手动 workflow_dispatch。
+#   目的：wbwopenglapi_skia.hpp + 示例 14_skia 的真实编译/运行验证。
+#   skia 端口首次安装约 15-30 分钟（大依赖），故独立于 release.yml。
+#   只构建 14_skia target（无 GLFW/GL 依赖，仅链接 skia），不连锁其余示例。
+name: Skia CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  skia-smoke:
+    name: windows-amd64 (MSVC + vcpkg skia)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: vcpkg install skia (cached)
+        id: vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: master
+          vcpkgDirectory: ${{ runner.workspace }}/vcpkg
+          vcpkgJsonGlob: '**/vcpkg.json'
+
+      - name: Configure (WBWOPENGAL_API_SKIA=ON)
+        run: >
+          cmake -B build -DWBWOPENGAL_API_SKIA=ON
+          "-DCMAKE_TOOLCHAIN_FILE=${{ runner.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake"
+
+      - name: Build 14_skia (Release)
+        run: cmake --build build --target 14_skia --config Release
+
+      - name: Run 14_skia (headless 像素校验 + BMP 导出)
+        run: .\build\Release\14_skia.exe
+
+      - name: Upload BMP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 14_skia.bmp
+          path: test/14_skia.bmp
+          if-no-files-found: error

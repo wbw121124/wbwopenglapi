@@ -76,8 +76,11 @@ $sources = if ($Example) {
     Get-ChildItem (Join-Path $root 'examples') -Filter '*.cpp' | ForEach-Object { $_.FullName }
 }
 if (-not $sources) { throw '未找到示例源文件' }
-
+if ($Example -eq '14_skia') {
+    throw '示例 14_skia 需 Skia 后端（vcpkg + CMake 构建），build.ps1 不提供；请参见 README/plan.md'
+}
 foreach ($src in $sources) {
+    if ((Get-Item $src).Name -eq '14_skia.cpp') { continue } # Skia 示例由 CMake 专用 target 构建
     $name = [System.IO.Path]::GetFileNameWithoutExtension($src)
     $out = Join-Path $build "$name.exe"
     Compile-Example $src $out $Backend

@@ -1,0 +1,9 @@
+{
+  "name": "wbwopenglapi",
+  "version-string": "0.1.0",
+  "description": "Header-only C++17 OpenGL 2D drawing library（Canvas 2D 风格）",
+  "homepage": "https://github.com/wbw121124/wbwopenglapi",
+  "dependencies": [
+    "skia"
+  ]
+}

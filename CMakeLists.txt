@@ -94,8 +94,23 @@ if(WBWOPENGAL_BUILD_NODE)
     add_subdirectory(napi)
 endif()
 
+# ---------------- Skia 可选后端（软件栅格化, 集成不替换） ----------------
+# 需要 vcpkg skia 端口 + MSVC 工具链: cmake -DWBWOPENGAL_API_SKIA=ON
+# -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+# 启用后额外构建示例 14_skia（无窗口, 仅链接 skia, 见下文）
+option(WBWOPENGAL_API_SKIA "使用 Skia 软件栅格化后端（vcpkg skia 端口）" OFF)
+if(WBWOPENGAL_API_SKIA)
+    find_package(skia CONFIG REQUIRED)
+    add_executable(14_skia ${WBWOPENGAL_ROOT}/examples/14_skia.cpp)
+    target_include_directories(14_skia PRIVATE ${WBWOPENGAL_ROOT}/include)
+    target_compile_definitions(14_skia PRIVATE WBWOPENGAL_API_SKIA)
+    target_link_libraries(14_skia PRIVATE skia)
+endif()
+
 # ---------------- 示例 ----------------
 file(GLOB WBWOPENGAL_EXAMPLES ${WBWOPENGAL_ROOT}/examples/*.cpp)
+# 14_skia 仅在 WBWOPENGAL_API_SKIA=ON 时构建（见上）
+list(REMOVE_ITEM WBWOPENGAL_EXAMPLES ${WBWOPENGAL_ROOT}/examples/14_skia.cpp)
 foreach(src ${WBWOPENGAL_EXAMPLES})
     get_filename_component(name ${src} NAME_WE)
     add_executable(${name} ${src})
