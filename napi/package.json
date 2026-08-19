@@ -7,7 +7,7 @@
     "build": "node scripts/build.cjs compile",
     "rebuild": "node scripts/build.cjs rebuild",
     "smoke": "node test/smoke.mjs",
-    "test": "node --test test/"
+    "test": "node --test"
   },
   "binary": {
     "napi_versions": [
