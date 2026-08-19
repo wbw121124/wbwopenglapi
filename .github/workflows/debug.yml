@@ -49,6 +49,10 @@ jobs:
           test -d skia-pkg/skia/include
           echo "package sanity OK"
 
+      - name: Fetch GLAD sources (CMakeLists 无条件构建 glad, 仓库不含 third_party)
+        shell: pwsh
+        run: & .\scripts\fetch_deps.ps1 -SkipGLFW -SkipFreeType -SkipFiraCode
+
       - name: Configure 14_skia (package only, no repo deps)
         run: >
           cmake -B build -A x64 -T ClangCL
