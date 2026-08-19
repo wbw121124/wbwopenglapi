@@ -1,0 +1,73 @@
+# debug.yml - Skia CI 成功后的发布格式端到端验证（windows-amd64）
+#   触发：Skia CI（workflow_run completed 且 success；无需手动，需其产物）。
+#   目的：用 Skia CI 打出的发布格式包（wbw-skia-windows-amd64.tar.gz，
+#   布局与 release-skia GN 分支完全一致）在干净 runner 上复现
+#   "下载包 → 内容校验 → 包直连编译 14_skia → 运行"，验证包自包含性，
+#   提前拦截 release-skia windows-amd64 的打包/链接问题。
+name: Debug (skia pack e2e)
+
+on:
+  workflow_run:
+    workflows: ["Skia CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  pack-e2e:
+    name: windows-amd64 (package -> compile -> run)
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download skia package (from Skia CI run)
+        uses: actions/download-artifact@v4
+        with:
+          name: wbw-skia-windows-amd64
+          path: pkg
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inspect package
+        shell: bash
+        run: |
+          ls -lh pkg/
+          tar -tzf pkg/wbwopenglapi-skia-windows-amd64.tar.gz | sed -n '1,30p'
+
+      - name: Extract + sanity check
+        shell: bash
+        run: |
+          mkdir -p skia-pkg
+          tar -xzf pkg/wbwopenglapi-skia-windows-amd64.tar.gz -C skia-pkg
+          test -f skia-pkg/wbwopenglapi.hpp
+          test -f skia-pkg/wbwopenglapi_skia.hpp
+          test -f skia-pkg/README-SKIA.md
+          test -f skia-pkg/skia/lib/skia.lib
+          test -f skia-pkg/skia/bin/icudtl.dat
+          test -d skia-pkg/skia/include
+          echo "package sanity OK"
+
+      - name: Configure 14_skia (package only, no repo deps)
+        run: >
+          cmake -B build -A x64 -T ClangCL
+          -DWBWOPENGAL_API_SKIA=ON
+          "-DWBWOPENGAL_API_SKIA_DIR=${{ github.workspace }}\skia-pkg\skia"
+
+      - name: Build 14_skia (Release)
+        run: cmake --build build --target 14_skia --config Release
+
+      - name: Copy icudtl.dat from package
+        shell: pwsh
+        run: Copy-Item "${{ github.workspace }}\skia-pkg\skia\bin\icudtl.dat" .\build\Release\
+
+      - name: Run 14_skia (headless 像素校验 + BMP 导出)
+        run: .\build\Release\14_skia.exe
+
+      - name: Upload BMP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 14_skia.bmp (debug)
+          path: test/14_skia.bmp
+          if-no-files-found: error

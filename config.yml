@@ -1,0 +1,37 @@
+# config.yml - 项目依赖版本中心（单一事实源）
+# 用途：集中登记所有依赖的版本号，供 .github/workflows/*.yml（经
+#       scripts/export-config.py 导出为环境变量）、scripts/fetch_deps.ps1
+#       （本地与 CI 共用）读取。升级依赖只改本文件。
+# 注意：GitHub Actions 的 uses: actions/xxx@vX 版本无法用表达式动态化，
+#       保持静态并在下方 actions 节登记对照。
+#
+# 命名约定：顶层键对应导出环境变量名（NODE_VERSION、SKIA_BRANCH ...），
+#       嵌套键用下划线连接（ACTIONS_CHECKOUT、VCPKG_REPO ...）。
+
+actions:                       # actions/xxx@vX 登记（静态引用，仅对照用）
+  checkout: v4
+  setup-node: v4
+  setup-python: v5
+  cache: v4
+  upload-artifact: v4
+  download-artifact: v4
+  msys2: v2
+  msvc-dev-cmd: v1
+  gh-release: v2
+
+node_version: "20"             # setup-node 用的 Node 版本
+python_version: "3.12"         # setup-python 用的 Python 版本
+
+skia:                          # Skia 源码（GN+LLVM 方案，google/skia 官方镜像）
+  repo: google/skia
+  branch: chrome/m152          # 当前 Chrome 稳定版对应分支
+
+vcpkg:                         # vcpkg 仓库（manifest 模式；skia 端口其余 7 平台用）
+  repo: microsoft/vcpkg
+
+glfw_version: "3.4"   # 下载 glfw-<glfw_version>.bin.WIN64.zip（fetch_deps.ps1 / release.yml 共用）                    # GLFW 官方预编译（release.yml 下载 URL 版本段）
+freetype: master               # ubawurinna/freetype-windows-binaries 分支（Windows DLL）
+harfbuzz: "14.3.1"             # HarfBuzz 官方源码版本（fetch_deps -HarfBuzz 自编译）
+firacode: "6.2"                # Fira Code 示例字体版本
+glad:
+  api: "gl=3.3"                # GLAD 生成参数（gl core 3.3）

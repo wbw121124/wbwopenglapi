@@ -19,6 +19,22 @@ $tmp = Join-Path $env:TEMP 'wbwopenglapi_deps'
 $zstdExe = Join-Path $tmp 'zstd.exe'
 New-Item -ItemType Directory -Force -Path $third, $tmp | Out-Null
 
+# ---------------- 版本中心（根 config.yml；缺失时用内置默认） ----------------
+function Read-ConfigValue {
+    param([string]$Key, [string]$Default = '')
+    $cfg = Join-Path $root 'config.yml'
+    if (-not (Test-Path $cfg)) { return $Default }
+    $pat = '^\s*' + [regex]::Escape($Key) + '\s*:\s*["'']?([^"'']*?)["'']?\s*$'
+    $m = Select-String -Path $cfg -Pattern $pat | Select-Object -First 1
+    if ($m -and $m.Matches[0].Groups[1].Value.Trim()) {
+        return $m.Matches[0].Groups[1].Value.Trim()
+    }
+    return $Default
+}
+$glfwVer = Read-ConfigValue 'glfw_version' '3.4'
+$hbVer = Read-ConfigValue 'harfbuzz' '14.3.1'
+$fcVer = Read-ConfigValue 'firacode' '6.2'
+
 function Invoke-Download {
     param([string]$Url, [string]$Out, [int]$TimeoutSec = 300)
     Write-Host "[fetch] $Url"
@@ -31,7 +47,7 @@ $glfwDone = Test-Path (Join-Path $third 'glfw\include\GLFW\glfw3.h')
 if ($SkipGLFW) { $glfwDone = $true }
 if (-not $glfwDone) {
     $zip = Join-Path $tmp 'glfw.zip'
-    Invoke-Download 'https://ghfast.top/https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.bin.WIN64.zip' $zip
+    Invoke-Download "https://ghfast.top/https://github.com/glfw/glfw/releases/download/$glfwVer/glfw-$glfwVer.bin.WIN64.zip" $zip
     $dst = Join-Path $tmp 'glfw_x'
     if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
     Expand-Archive -Path $zip -DestinationPath $dst
@@ -118,8 +134,8 @@ if ($HarfBuzz) {
                 throw "meson/ninja 未安装到 $pyScripts"
             }
             # 2. 下载源码
-            $srcUrl = 'https://ghfast.top/https://github.com/harfbuzz/harfbuzz/releases/download/14.3.1/harfbuzz-14.3.1.tar.xz'
-            $tar = Join-Path $tmp 'harfbuzz-14.3.1.tar.xz'
+            $srcUrl = "https://ghfast.top/https://github.com/harfbuzz/harfbuzz/releases/download/$hbVer/harfbuzz-$hbVer.tar.xz"
+            $tar = Join-Path $tmp "harfbuzz-$hbVer.tar.xz"
             if (-not (Test-Path $tar)) { Invoke-Download $srcUrl $tar 900 }
             $srcDir = Join-Path $tmp 'hb_src'
             if (Test-Path $srcDir) { Remove-Item -Recurse -Force $srcDir }
@@ -131,7 +147,7 @@ if ($HarfBuzz) {
             $pcDir = Join-Path $tmp 'pkgconfig'
             New-Item -ItemType Directory -Force -Path $pcDir | Out-Null
             $ftThird = (Join-Path $third 'freetype').Replace('\', '/')
-            @"
+@"
 prefix=$ftThird
 libdir=`${prefix}/bin
 includedir=`${prefix}/include
@@ -142,7 +158,7 @@ Version: 26.1.20
 Libs: -L`${libdir} -lfreetype
 Cflags: -I`${includedir}
 "@ | Set-Content -Path (Join-Path $pcDir 'freetype2.pc') -Encoding ascii
-            @'
+@'
 import os, re, sys, glob
 
 def read_pc(name):
@@ -231,7 +247,8 @@ def main():
 if __name__ == '__main__':
     sys.exit(main())
 '@ | Set-Content -Path (Join-Path $tmp 'pkg-config.py') -Encoding ascii
-            '@echo off
+@'
+@echo off
 python "%~dp0pkg-config.py" %*
 '@ | Set-Content -Path (Join-Path $tmp 'pkg-config.cmd') -Encoding ascii
             # 5. meson 配置 + 编译 + 安装
@@ -272,7 +289,7 @@ if ($SkipFiraCode) { $fcDone = $true }
 if (-not $fcDone) {
     try {
         $zip = Join-Path $tmp 'firacode.zip'
-        Invoke-Download 'https://github.com/tonsky/FiraCode/releases/download/6.2/Fira_Code_v6.2.zip' $zip
+        Invoke-Download "https://github.com/tonsky/FiraCode/releases/download/$fcVer/Fira_Code_v$fcVer.zip" $zip
         $dst = Join-Path $tmp 'fc_x'
         if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
         Expand-Archive -Path $zip -DestinationPath $dst

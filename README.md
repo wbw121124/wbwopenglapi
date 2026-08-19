@@ -105,7 +105,12 @@ build\Release\14_skia.exe
 `include/wbwopenglapi_skia.hpp` 的绘制语义与主库一致（左上原点 / y 向下 /
 RasterSurface 输出 top-down RGBA）。MinGW 8.1 无法构建 skia（需 LLVM/MSVC
 工具链），故本机 build.ps1 不提供 14_skia；实际编译验证由
-`.github/workflows/skia-ci.yml`（windows-latest + GN + LLVM clang）完成。
+`.github/workflows/skia-ci.yml`（windows-latest + GN + LLVM clang）完成：
+Skia CI 成功后还会打出发布格式的包
+（`wbwopenglapi-skia-windows-amd64.tar.gz`，布局与 release-skia.yml 的
+windows-amd64 完全一致），再由 `.github/workflows/debug.yml`（workflow_run
+触发）下载该包、校验内容，并在干净 runner 上仅用包内文件直连重新编译并
+运行 14_skia —— 提前拦截 release-skia windows-amd64 的打包/链接问题。
 
 ### Node.js（Node-API，napi/）
 

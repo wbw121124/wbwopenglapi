@@ -151,6 +151,45 @@
 ## 排障记录
 （按步追加）
 
+# 发布任务后续：config.yml 版本中心 + Skia CI 打包 e2e（debug.yml）
+
+## 目标
+- 根目录 config.yml 集中管理所有依赖版本号；scripts/export-config.py 扁平化导出
+  KEY=VALUE（嵌套键 `_` 连接并大写，如 SKIA_BRANCH/GLFW），写入 $GITHUB_ENV，
+  三个 workflow（release.yml / release-skia.yml / skia-ci.yml）统一经
+  `python scripts/export-config.py >> "$GITHUB_ENV"` 装载；PyYAML 缺失自动安装
+- Skia CI（windows-amd64 GN+LLVM）成功后打发布格式包并上传 artifact；
+  新增 debug.yml（workflow_run on Skia CI success）下载包 → 内容校验 →
+  仅用包内文件直连编译 14_skia → 运行，提前拦截 release-skia windows-amd64 打包/链接问题
+
+## 已落地（本次会话）
+- config.yml（actions 对照登记 + node/python + skia repo/branch chrome/m152 + vcpkg
+  repo + glfw/harfbuzz/firacode 版本 + glad api）
+- export-config.py（`python scripts/export-config.py [-c <path>]`；自动 pip install pyyaml）
+- release.yml：Load 步骤 + setup-node 用 ${{ env.NODE_VERSION }} + GLFW URL 用 $env:GLFW_VERSION
+- release-skia.yml：Load 步骤（checkout 后, skia/vcpkg checkout 前）+ setup-python 用
+  ${{ env.PYTHON_VERSION }}；checkout 用 ${{ env.SKIA_REPO }}/${{ env.SKIA_BRANCH }}/${{ env.VCPKG_REPO }}
+- skia-ci.yml：Load 步骤 + checkout skia 用 ${{ env.SKIA_REPO }}/${{ env.SKIA_BRANCH }}
+  + Package 步骤（发布格式 wbwopenglapi-skia-windows-amd64.tar.gz, artifact
+  wbw-skia-windows-amd64, retention 14 天）
+- debug.yml：workflow_run on "Skia CI" completed+success → download-artifact(run-id) →
+  Inspect/Extract+sanity → cmake -T ClangCL 直连包内 SKIA_DIR 编译 14_skia →
+  拷贝包内 icudtl.dat → 运行 → 上传 BMP
+- fetch_deps.ps1：从 config.yml 读 glfw/harfbuzz/firacode 版本（缺省仍可用默认值）；
+  修复历史遗留 here-string 开始/闭合标记缩进错误与 pkg-config.cmd 缺失开始标记
+  （ParseFile 语法检查通过）
+
+## 遗留
+- [ ] 验 config.yml 解析：确认 config.yml 与 fetch_deps 关键值解读正确
+- [ ] 推送后观察 4 个 workflow；debug.yml 首次由 push main 触发 skia-ci 成功后自动跑
+- [ ] 后续考虑：fetch_deps 的 freetype 分支/glad api 参数化入 config.yml（当前仅登记）
+- [ ] vcpkg 端口版本等仍由 vcpkg.json 管理（config.yml 仅登记 vcpkg repo）
+
+## 排障记录
+- PowerShell here-string 的开始/闭合标记必须行首（不能带缩进）；历史代码 4 处缩进
+  标记导致 ParseFile 报 "Unrecognized token '@'"；pkg-config.cmd 段还漏了 `@'` 开始标记
+  （L250 直接以内容开头）——已全部修正
+
 # 发布任务：GitHub Actions 打包头文件+库（Skia 用 LLVM）+ napi → Releases
 
 ## 目标

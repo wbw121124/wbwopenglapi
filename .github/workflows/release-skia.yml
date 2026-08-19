@@ -17,10 +17,6 @@ on:
 permissions:
   contents: write
 
-env:
-  SKIA_REPO: google/skia
-  SKIA_BRANCH: chrome/m152
-
 jobs:
   skia:
     name: skia-${{ matrix.name }}
@@ -44,9 +40,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load dependency versions (config.yml)
+        shell: bash
+        run: python scripts/export-config.py >> "$GITHUB_ENV"
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ env.PYTHON_VERSION }}
 
       # ---------------- GN+LLVM 方案（windows-amd64，Build-Skia 已验证链路） ----------------
       - name: Checkout Skia source (chrome stable 对应分支)
@@ -145,7 +145,7 @@ jobs:
         if: matrix.gn != 'true'
         uses: actions/checkout@v4
         with:
-          repository: microsoft/vcpkg
+          repository: ${{ env.VCPKG_REPO }}
           path: vcpkg
 
       - uses: actions/cache@v4

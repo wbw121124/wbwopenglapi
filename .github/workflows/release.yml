@@ -41,10 +41,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load dependency versions (config.yml)
+        shell: bash
+        run: python scripts/export-config.py >> "$GITHUB_ENV"
+
       - uses: actions/setup-node@v4
         if: matrix.napi == 'true'
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
 
       # ---------------- 系统构建依赖 ----------------
       - name: Linux deps
@@ -79,10 +83,10 @@ jobs:
         run: |
           $third = Join-Path (Get-Location) 'third_party'
           New-Item -ItemType Directory -Force -Path $third | Out-Null
-          $glUrl = 'https://github.com/glfw/glfw/releases/download/3.4'
+          $glUrl = "https://github.com/glfw/glfw/releases/download/$env:GLFW_VERSION"
           foreach ($p in @('WIN64', 'WIN32')) {
             $z = Join-Path $env:RUNNER_TEMP "glfw-$p.zip"
-            Invoke-WebRequest "$glUrl/glfw-3.4.bin.$p.zip" -OutFile $z
+            Invoke-WebRequest "$glUrl/glfw-$env:GLFW_VERSION.bin.$p.zip" -OutFile $z
             $ex = Join-Path $env:RUNNER_TEMP "glfw-$p"
             Expand-Archive $z -DestinationPath $ex -Force
             $root = (Get-ChildItem $ex -Directory | Select-Object -First 1).FullName
