@@ -1,13 +1,15 @@
 # build.ps1 - 本机（win32/MinGW）一键构建脚本
 #   默认后端 auto: 若 third_party/freetype 已就绪则用 FreeType 后端，否则 GDI 后端
 #   -HarfBuzz: 在 FreeType 后端基础上启用 HarfBuzz 整形（需 third_party/harfbuzz 就绪）
+#   -Backend dwrite: DirectWrite 矢量字体后端（Windows 8.1+ 系统库，无第三方依赖）
 # 用法:
 #   powershell -ExecutionPolicy Bypass -File build.ps1                # 构建全部示例
 #   powershell -ExecutionPolicy Bypass -File build.ps1 -Backend gdi   # 指定后端
+#   powershell -ExecutionPolicy Bypass -File build.ps1 -Backend dwrite # DirectWrite 后端
 #   powershell -ExecutionPolicy Bypass -File build.ps1 -HarfBuzz      # FreeType + HarfBuzz
 #   powershell -ExecutionPolicy Bypass -File build.ps1 -Example 01_hello -Run
 param(
-    [ValidateSet('auto', 'gdi', 'freetype')][string]$Backend = 'auto',
+    [ValidateSet('auto', 'gdi', 'freetype', 'dwrite')][string]$Backend = 'auto',
     [string]$Example = '',
     [switch]$Run,
     [switch]$HarfBuzz
@@ -47,6 +49,12 @@ function Compile-Example {
             $args += '-DWBWOPENGAL_API_FONT_HARFBUZZ'
             $libs += (Join-Path $third 'harfbuzz\bin\libharfbuzz-0.dll')
         }
+    } elseif ($UseBackend -eq 'dwrite') {
+        # DirectWrite 系统库（MinGW 自带 libdwrite.a）
+        $args += '-DWBWOPENGAL_API_FONT_DWRITE'
+        $libs += '-ldwrite'
+        # 过渡期: 步 2 接入头文件 DWrite 分支前, 宏未生效时回落 GDI 后端, 保留 gdi32
+        $libs += '-lgdi32'
     } else {
         $libs += '-lgdi32'
     }

@@ -7,6 +7,14 @@ project(wbwopenglapi LANGUAGES C CXX)
 option(WBWOPENGAL_API_FONT_FREETYPE "使用 FreeType 字体后端" OFF)
 # 可选: 在 FreeType 后端基础上启用 HarfBuzz 整形（连体/OpenType 特性，需 third_party/harfbuzz）
 option(WBWOPENGAL_API_FONT_HARFBUZZ "使用 HarfBuzz 文本整形" OFF)
+# DirectWrite 矢量字体后端（Windows 8.1+，系统库 dwrite 无第三方依赖；与 FreeType 互斥）
+option(WBWOPENGAL_API_FONT_DWRITE "使用 DirectWrite 字体后端（仅 Windows）" OFF)
+if(WBWOPENGAL_API_FONT_DWRITE AND NOT WIN32)
+    message(FATAL_ERROR "WBWOPENGAL_API_FONT_DWRITE 仅支持 Windows 平台")
+endif()
+if(WBWOPENGAL_API_FONT_DWRITE AND WBWOPENGAL_API_FONT_FREETYPE)
+    message(FATAL_ERROR "WBWOPENGAL_API_FONT_DWRITE 与 WBWOPENGAL_API_FONT_FREETYPE 互斥，只能启用其一")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -66,6 +74,11 @@ if(WBWOPENGAL_API_FONT_FREETYPE)
             list(APPEND WBWOPENGAL_FONT_DEFINES WBWOPENGAL_API_FONT_HARFBUZZ)
         endif()
     endif()
+elseif(WBWOPENGAL_API_FONT_DWRITE)
+    # DirectWrite（Windows 已在上方强制校验）
+    list(APPEND WBWOPENGAL_FONT_DEFINES WBWOPENGAL_API_FONT_DWRITE)
+    # 过渡期: 步 2 接入头文件 DWrite 分支前, 宏未生效时回落 GDI 后端, 保留 gdi32
+    list(APPEND WBWOPENGAL_FONT_LIBS dwrite gdi32)
 elseif(WIN32)
     # Windows 默认 GDI 后端, 需要链接 gdi32
     list(APPEND WBWOPENGAL_FONT_LIBS gdi32)

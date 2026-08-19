@@ -100,8 +100,10 @@
 
 ## 步骤（每步：更新本文 → git add（仅该步文件）→ commit → push）
 - [x] 步 0/4：现状分析 + 技术方案 + 最小链路验证（dt_smoke：MinGW dwrite 头/链接/几何 sink exit=0）
-- [ ] 步 1/4：构建配置：build.ps1 `-Backend dwrite`（`-ldwrite`）；根 CMakeLists
-      `WBWOPENGAL_API_FONT_DWRITE` option（Windows-only）→ 验证 05_text 用 DWrite 后端编译运行
+- [x] 步 1/4：构建配置：build.ps1 `-Backend dwrite`（`-ldwrite`）；根 CMakeLists
+      `WBWOPENGAL_API_FONT_DWRITE` option（Windows-only，与 FreeType 互斥）
+      → 验证：dwrite 后端编译 05_text 通过；09_text_lines -t 回归 7 项全绿
+      （本步宏未接入头文件前回落 GDI 路径，故过渡期保留 gdi32 链接）
 - [ ] 步 2/4：DirectWrite 封装层：FontFace 第三后端分支（工厂/字体/度量/字形轮廓收集器/advance）
 - [ ] 步 3/4：整合 + 示例 13_dwrite_text（仿 05_text，含 -t 回归）+ README 构建章节 + 全量回归
 - [ ] 步 4/4：Skia：vcpkg.json manifest + `WBWOPENGAL_API_SKIA` option + include/wbwopenglapi_skia.hpp
