@@ -47,6 +47,6 @@
 
 ## 阶段
 - [x] 阶段1/4：napi/ 包骨架 + 构建链打通（最小 addon 编译、加载、隐藏窗口 clear/fillRect/resolve 读回像素验证通过）
-- [ ] 阶段2/4：完整 C++ API 映射（renderer.h / renderer_wrap / bmp / addon 注册）
+- [x] 阶段2/4：完整 C++ API 映射（renderer.h / renderer_wrap / bmp / addon 注册），冒烟验证通过：矩形/路径/文本/图像/变换/BMP
 - [ ] 阶段3/4：JS 包装层（lib/index.js）+ smoke + node:test 自动化断言
 - [ ] 阶段4/4：C++ 原生全量回归（build.ps1 + 01-12 -t）+ README 增补 + 最终提交

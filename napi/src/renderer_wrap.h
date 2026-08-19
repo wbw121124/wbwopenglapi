@@ -1,0 +1,114 @@
+// renderer_wrap.h - Canvas 完整 2D API 的 Node 绑定（Napi::ObjectWrap）
+#ifndef WBW_NAPI_RENDERER_WRAP_H
+#define WBW_NAPI_RENDERER_WRAP_H
+
+#include <napi.h>
+
+#include <memory>
+
+#include "renderer.h"
+
+namespace wbw_napi {
+
+// loadBMP(path) -> ImageHandle（RGBA 位图，无 GL 资源，析构安全）
+class ImageWrap : public Napi::ObjectWrap<ImageWrap> {
+public:
+    static void Init(Napi::Env env, Napi::Object exports);
+    ImageWrap(const Napi::CallbackInfo& info);
+    wbwopenglapi::Image img;
+
+    Napi::Value GetWidth(const Napi::CallbackInfo& i);
+    Napi::Value GetHeight(const Napi::CallbackInfo& i);
+
+    // 类构造函数引用（addon 单实例；worker_threads 多 env 场景需改 env 键控存储）
+    static Napi::FunctionReference ctor;
+};
+
+// createCanvas(w, h) -> CanvasHandle（隐藏窗口 + 绘制上下文）
+class RendererWrap : public Napi::ObjectWrap<RendererWrap> {
+public:
+    static Napi::Object Init(Napi::Env env, Napi::Object exports);
+
+    RendererWrap(const Napi::CallbackInfo& info);
+    void Finalize(Napi::Env env) override; // GC 兜底：入 pending 队列延迟释放
+
+    static Napi::FunctionReference ctor;
+
+private:
+    std::shared_ptr<Renderer> r_; // 为空 = 已 close
+
+    // ---- 工具 ----
+    // 取底层引用；已 close 时抛 JS Error（E_CLOSED 语义由 JS 层包装）
+    Renderer& get();
+    // 帧协议：读回前确保离屏结果已合成到默认 framebuffer（幂等）
+    static void ensureResolved(Renderer& r);
+    // 参数解析（类型错抛 TypeError；数字含 NaN/Infinity 抛 RangeError）
+    static double Num(const Napi::CallbackInfo& i, size_t idx, double def);
+    static std::string Str(const Napi::CallbackInfo& i, size_t idx,
+                           const std::string& def);
+    static bool Bool(const Napi::CallbackInfo& i, size_t idx, bool def);
+    static wbwopenglapi::Color ColorArg(const Napi::CallbackInfo& i, size_t idx,
+                                        const wbwopenglapi::Color& def);
+    static void RequireArgs(const Napi::CallbackInfo& i, size_t n,
+                            const char* name);
+    static Napi::Object ToObject(const Napi::CallbackInfo& i, size_t idx);
+
+    // ---- 方法 ----
+    // 样式
+    Napi::Value Clear(const Napi::CallbackInfo& i);
+    Napi::Value FillStyle(const Napi::CallbackInfo& i);
+    Napi::Value StrokeStyle(const Napi::CallbackInfo& i);
+    Napi::Value LineWidth(const Napi::CallbackInfo& i);
+    Napi::Value GlobalAlpha(const Napi::CallbackInfo& i);
+    Napi::Value LineAlgorithm(const Napi::CallbackInfo& i);
+    Napi::Value Antialias(const Napi::CallbackInfo& i);
+    Napi::Value Font(const Napi::CallbackInfo& i);
+    Napi::Value TextAlign(const Napi::CallbackInfo& i);
+    Napi::Value TextBaseline(const Napi::CallbackInfo& i);
+    Napi::Value FontFeatures(const Napi::CallbackInfo& i);
+    Napi::Value ResetFontFeatures(const Napi::CallbackInfo& i);
+    // 矩形
+    Napi::Value FillRect(const Napi::CallbackInfo& i);
+    Napi::Value StrokeRect(const Napi::CallbackInfo& i);
+    Napi::Value ClearRect(const Napi::CallbackInfo& i);
+    // 路径
+    Napi::Value BeginPath(const Napi::CallbackInfo& i);
+    Napi::Value MoveTo(const Napi::CallbackInfo& i);
+    Napi::Value LineTo(const Napi::CallbackInfo& i);
+    Napi::Value QuadraticCurveTo(const Napi::CallbackInfo& i);
+    Napi::Value BezierCurveTo(const Napi::CallbackInfo& i);
+    Napi::Value Arc(const Napi::CallbackInfo& i);
+    Napi::Value Rect(const Napi::CallbackInfo& i);
+    Napi::Value ClosePath(const Napi::CallbackInfo& i);
+    Napi::Value Fill(const Napi::CallbackInfo& i);
+    Napi::Value Stroke(const Napi::CallbackInfo& i);
+    // 文本
+    Napi::Value FillText(const Napi::CallbackInfo& i);
+    Napi::Value StrokeText(const Napi::CallbackInfo& i);
+    Napi::Value MeasureText(const Napi::CallbackInfo& i);
+    // 变换
+    Napi::Value Translate(const Napi::CallbackInfo& i);
+    Napi::Value Rotate(const Napi::CallbackInfo& i);
+    Napi::Value Save(const Napi::CallbackInfo& i);
+    Napi::Value Restore(const Napi::CallbackInfo& i);
+    Napi::Value ResetTransform(const Napi::CallbackInfo& i);
+    // 图像
+    Napi::Value DrawImage(const Napi::CallbackInfo& i);
+    // 帧 / 输出
+    Napi::Value Resolve(const Napi::CallbackInfo& i);
+    Napi::Value ReadPixels(const Napi::CallbackInfo& i);
+    Napi::Value ToBmp(const Napi::CallbackInfo& i);
+    Napi::Value SwapBuffers(const Napi::CallbackInfo& i);
+    Napi::Value Close(const Napi::CallbackInfo& i);
+
+    // 静态模块级
+    static Napi::Value LoadBmp(const Napi::CallbackInfo& i);
+    static Napi::Value CreateCanvas(const Napi::CallbackInfo& i);
+    // 属性 getter
+    Napi::Value GetWidth(const Napi::CallbackInfo& i);
+    Napi::Value GetHeight(const Napi::CallbackInfo& i);
+};
+
+} // namespace wbw_napi
+
+#endif // WBW_NAPI_RENDERER_WRAP_H

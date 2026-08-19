@@ -28,6 +28,8 @@ set(WBWOPENGAL_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 add_library(wbwopenglapi SHARED
     src/addon.cc
+    src/renderer_wrap.cc
+    src/bmp.cc
     ${CMAKE_JS_SRC}
     ${WBWOPENGAL_ROOT}/third_party/glad/src/gl.c)
 
