@@ -70,6 +70,34 @@ Universal CRT，MinGW 直接链接该 DLL）。Windows 不定义该宏则自动�
 （Windows 链接 third_party/harfbuzz 自编译的 `libharfbuzz-0.dll`，仅依赖
 freetype.dll；Linux 经 pkg-config harfbuzz）后启用 OpenType 特性。
 
+### Node.js（Node-API，napi/）
+
+```
+cd napi
+npm install        # node-addon-api + cmake-js + cmake-runtime
+npm run build      # 生成 build/wbwopenglapi.node（MinGW；需已编译 third_party/glfw）
+npm test           # node:test 自动化测试（10 项）+ smoke
+```
+
+```js
+const { createCanvas, loadBMP } = require('./napi/lib/index.js');
+
+const c = createCanvas(800, 600);
+c.clear([245, 245, 245, 255]);
+c.fillStyle('#ff8000');
+c.fillRect(50, 50, 200, 150);
+c.font('32px sans-serif');
+c.fillText('Hello from Node.js', 60, 260);
+c.resolve();                          // 渲染当前帧到默认帧缓冲
+const px = c.readPixels(0, 0, c.width, c.height); // RGBA Buffer（y 向下）
+fs.writeFileSync('out.bmp', c.toBMP());
+c.close();
+```
+
+构建链：cmake-js + MinGW Makefiles + cmake-runtime 提供的 cmake.exe。
+颜色参数支持 CSS 字符串、`{r,g,b,a}` 对象、`[r,g,b,a]` 数组（数值 0..255 或 0..1）。
+隐藏窗口无头渲染，HiDPI 下 framebuffer 可能非等比缩放（画布坐标保持逻辑像素）。
+
 ## 示例
 
 | 示例 | 内容 |
@@ -167,9 +195,10 @@ wbwopenglapi/
 ├─ third_party/               # 依赖（gitignore）
 │  ├─ fonts/                  # Fira Code（10_ligature 用，fetch_deps 下载）
 │  └─ harfbuzz/               # HarfBuzz 自编译（fetch_deps.ps1 -HarfBuzz）
-├─ examples/                  # 01_hello ... 10_ligature
+├─ examples/                  # 01_hello ... 12_antialias
 ├─ scripts/fetch_deps.ps1     # 下载依赖（Windows；-HarfBuzz 自编译 HarfBuzz）
 ├─ build.ps1                  # 一键构建（Windows/MinGW）
 ├─ CMakeLists.txt             # 跨平台构建
+├─ napi/                      # Node-API 绑定包（lib/index.js + src/*.cc + 测试）
 └─ plan.md                    # 开发计划与排障记录
 ```
