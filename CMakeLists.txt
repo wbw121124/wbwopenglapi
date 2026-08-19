@@ -95,16 +95,33 @@ if(WBWOPENGAL_BUILD_NODE)
 endif()
 
 # ---------------- Skia 可选后端（软件栅格化, 集成不替换） ----------------
-# 需要 vcpkg skia 端口 + MSVC 工具链: cmake -DWBWOPENGAL_API_SKIA=ON
-# -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-# 启用后额外构建示例 14_skia（无窗口, 仅链接 skia, 见下文）
-option(WBWOPENGAL_API_SKIA "使用 Skia 软件栅格化后端（vcpkg skia 端口）" OFF)
+# 两种引入方式（二选一）：
+#   A. vcpkg skia 端口:  cmake -DWBWOPENGAL_API_SKIA=ON
+#      -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+#   B. GN+LLVM 自建产物直连（aseprite/skia m102 等: include/ + *.lib）:
+#      cmake -DWBWOPENGAL_API_SKIA=ON -DWBWOPENGAL_API_SKIA_DIR=<gn out 目录>
+# 启用后额外构建示例 14_skia（无窗口, 仅链接 skia, 见下文；icudtl.dat 需自拷运行）
+option(WBWOPENGAL_API_SKIA "使用 Skia 软件栅格化后端（vcpkg skia 端口或 GN 产物直连）" OFF)
+set(WBWOPENGAL_API_SKIA_DIR "" CACHE PATH "GN/LLVM 自建 skia 产物目录（含 include/ 与 *.lib/*.a，跳过 vcpkg）")
 if(WBWOPENGAL_API_SKIA)
-    find_package(skia CONFIG REQUIRED)
     add_executable(14_skia ${WBWOPENGAL_ROOT}/examples/14_skia.cpp)
     target_include_directories(14_skia PRIVATE ${WBWOPENGAL_ROOT}/include)
     target_compile_definitions(14_skia PRIVATE WBWOPENGAL_API_SKIA)
-    target_link_libraries(14_skia PRIVATE skia)
+    if(WBWOPENGAL_API_SKIA_DIR)
+        target_include_directories(14_skia PRIVATE ${WBWOPENGAL_API_SKIA_DIR}/include)
+        if(WIN32)
+            file(GLOB WBWOPENGAL_SKIA_LIBS "${WBWOPENGAL_API_SKIA_DIR}/*.lib")
+        else()
+            file(GLOB WBWOPENGAL_SKIA_LIBS "${WBWOPENGAL_API_SKIA_DIR}/*.a")
+        endif()
+        if(NOT WBWOPENGAL_SKIA_LIBS)
+            message(FATAL_ERROR "WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: ${WBWOPENGAL_API_SKIA_DIR}")
+        endif()
+        target_link_libraries(14_skia PRIVATE ${WBWOPENGAL_SKIA_LIBS})
+    else()
+        find_package(skia CONFIG REQUIRED)
+        target_link_libraries(14_skia PRIVATE skia)
+    endif()
 endif()
 
 # ---------------- 示例 ----------------

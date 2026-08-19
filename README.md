@@ -81,19 +81,31 @@ freetype.dll；Linux 经 pkg-config harfbuzz）后启用 OpenType 特性。
 
 ### Skia（可选，软件栅格化）
 
+两种引入方式（二选一）：
+
 ```
-# 需 MSVC + vcpkg（skia 端口约 15-30 分钟首次安装）
+# A. vcpkg skia 端口（CLI 装依赖较慢）
 cmake -B build -DWBWOPENGAL_API_SKIA=ON `
   -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
 cmake --build build --target 14_skia --config Release
 build\Release\14_skia.exe   # headless 像素校验 + 导出 test/14_skia.bmp
 ```
 
+```
+# B. GN+LLVM 自建产物直连（aseprite/skia m102 + depot_tools + clang + GN/ninja，
+#    全部 LLVM 编译；产物含 include/ 与 *.lib，见仓库 Build-Skia）
+cmake -B build -A x64 -T ClangCL -DWBWOPENGAL_API_SKIA=ON `
+  -DWBWOPENGAL_API_SKIA_DIR=<skia out 目录>
+cmake --build build --target 14_skia --config Release
+copy <skia out>\icudtl.dat build\Release\   # skia 运行时 ICU 数据
+build\Release\14_skia.exe
+```
+
 启用后额外构建示例 14_skia（无窗口无 GL 依赖，仅链接 skia）；
 `include/wbwopenglapi_skia.hpp` 的绘制语义与主库一致（左上原点 / y 向下 /
-RasterSurface 输出 top-down RGBA）。MinGW 8.1 无法构建 skia 端口
-（需 MSVC），故本机 build.ps1 不提供 14_skia；实际编译验证由
-`.github/workflows/skia-ci.yml`（windows-latest + MSVC + vcpkg）完成。
+RasterSurface 输出 top-down RGBA）。MinGW 8.1 无法构建 skia（需 LLVM/MSVC
+工具链），故本机 build.ps1 不提供 14_skia；实际编译验证由
+`.github/workflows/skia-ci.yml`（windows-latest + GN + LLVM clang）完成。
 
 ### Node.js（Node-API，napi/）
 
@@ -127,17 +139,21 @@ c.close();
 
 ## 发布（GitHub Actions）
 
-推送 `v*` 标签（或手动 `workflow_dispatch`）触发 `.github/workflows/release.yml`，
-在 8 个平台组合上构建并发布三个包到 Releases：
+推送 `v*` 标签（或手动 `workflow_dispatch`）触发两个发布 workflow：
+
+- `.github/workflows/release.yml`：核心包 + napi 包（8 平台组合）
+- `.github/workflows/release-skia.yml`：Skia 库包（独立，互不阻塞）
+
+发布到 Releases：
 
 - `wbwopenglapi-<os>-<arch>.tar.gz`：核心包（header-only 库：include/ + CMakeLists/
   README；Windows x64/x86 额外含 glfw3.dll 与导入库）
 - `wbwopenglapi-napi-<os>-<arch>.tar.gz`：Node 插件（build/*.node + lib/index.js +
   package.json，解压后 `npm install <tarball>` 可用）
-- `wbwopenglapi-skia-<os>-<arch>.tar.gz`：Skia 库包（LLVM 构建：Windows 为
-  clang-cl + MSVC 运行库，Linux/macOS 为系统 clang；内含 wbwopenglapi.hpp /
-  wbwopenglapi_skia.hpp + skia 全量 include/lib/bin，配合
-  `-DWBWOPENGAL_API_SKIA=ON` 使用，无需 vcpkg）
+- `wbwopenglapi-skia-<os>-<arch>.tar.gz`：Skia 库包（LLVM 构建：windows-amd64 为
+  GN+LLVM 自建 aseprite/skia m102 [实验性]，其余平台为 vcpkg 端口 + clang/clang-cl；
+  内含 wbwopenglapi.hpp / wbwopenglapi_skia.hpp + skia 全量 include/lib/bin，
+  配合 Skia 章节方案 B/C 使用，无需 vcpkg）
 
 平台：linux / windows / macos ×（amd64、arm64），另加 linux-x86 与 windows-x86
 （32 位，实验性 skia 包）。windows-arm64 使用 `windows-11-vs2026-arm`（ARM64

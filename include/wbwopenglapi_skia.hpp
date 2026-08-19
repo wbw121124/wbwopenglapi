@@ -4,9 +4,14 @@
 // 目标: 提供与 wbwopenglapi 一致的 Canvas 坐标语义（左上原点、y 向下、单位像素），
 //      经 SkSurface::MakeRaster 纯 CPU 栅格化输出 top-down RGBA8，
 //      供无窗口/headless 渲染、纹理合成前处理或文件导出使用。
-// 引入方式: vcpkg skia 端口（find_package(skia CONFIG)），编译时定义宏 WBWOPENGAL_API_SKIA。
-//   构建: cmake -DWBWOPENGAL_API_SKIA=ON -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-//   注意: skia 端口需 MSVC 工具链（MinGW 8.1 不可构建），CI 用 windows-msvc 验证；
+// 引入方式（二选一），编译时定义宏 WBWOPENGAL_API_SKIA:
+//   A. vcpkg skia 端口: cmake -DWBWOPENGAL_API_SKIA=ON
+//      -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+//      (find_package(skia CONFIG))
+//   B. GN+LLVM 自建产物直连: cmake -DWBWOPENGAL_API_SKIA=ON
+//      -DWBWOPENGAL_API_SKIA_DIR=<gn out 目录>（含 include/ 与 *.lib/*.a，
+//      icudtl.dat 需拷到运行目录）
+//   注意: skia 需 LLVM/MSVC 工具链（MinGW 8.1 不可构建），CI 用 GN+LLVM 验证；
 //         本文件不依赖 wbwopenglapi.hpp，可独立编译。
 // 边界: 文本为 Skia 自带字体栈（Segoe UI 等），不走 GDI/FreeType/DirectWrite 后端；
 //       绘制接口为子集（矩形/圆/路径/文本/变换），与主库同语义部分一一对应。

@@ -1,8 +1,10 @@
 # skia-ci.yml - Skia 可选后端集成验证（软件栅格化, 无窗口）
 #   触发：推送 main 或手动 workflow_dispatch。
 #   目的：wbwopenglapi_skia.hpp + 示例 14_skia 的真实编译/运行验证。
-#   skia 端口首次安装约 15-30 分钟（大依赖），故独立于 release.yml，
-#   并缓存 vcpkg/installed 加速后续运行。
+#   构建方式：GN+LLVM 自建（aseprite/skia aseprite-m102 分支 + depot_tools +
+#   LLVM clang + GN + ninja），全程 LLVM 无 MSVC 编译器；产物经
+#   WBWOPENGAL_API_SKIA_DIR 直连 CMake（见根 CMakeLists.txt）。
+#   与 release-skia.yml 的 windows-amd64 组合同链路（发布链路的先行验证）。
 #   只构建 14_skia target（无 GLFW/GL 依赖，仅链接 skia），不连锁其余示例。
 name: Skia CI
 
@@ -13,7 +15,7 @@ on:
 
 jobs:
   skia-smoke:
-    name: windows-amd64 (LLVM/clang-cl + vcpkg skia)
+    name: windows-amd64 (GN + LLVM clang + vcpkg-free)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,57 +24,83 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Checkout vcpkg
+      - name: Checkout Skia source (aseprite-m102)
         uses: actions/checkout@v4
         with:
-          repository: microsoft/vcpkg
-          path: vcpkg
+          repository: aseprite/skia
+          ref: aseprite-m102
+          path: skia
 
-      - name: Cache vcpkg installed (clang 构建产物)
+      - name: Setup depot_tools
+        shell: pwsh
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$env:GITHUB_WORKSPACE\depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & .\depot_tools\gclient.bat
+
+      - name: Install LLVM and Ninja
+        shell: pwsh
+        run: |
+          choco install llvm ninja -y --limit-output
+          echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Setup Visual Studio environment (clang 运行时库/头)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Fix Clang directory structure for Skia
+        shell: pwsh
+        run: |
+          $clangDir = "C:\Program Files\LLVM"
+          New-Item -ItemType Directory -Force -Path "$clangDir\lib\clang"
+          $clangVersion = & "$clangDir\bin\clang.exe" --version | Select-String -Pattern "version (\d+\.\d+\.\d+)" | ForEach-Object { $_.Matches.Groups[1].Value }
+          if ($clangVersion) {
+            New-Item -ItemType Directory -Force -Path "$clangDir\lib\clang\$clangVersion"
+            Write-Host "Created Clang version directory: $clangDir\lib\clang\$clangVersion"
+          } else {
+            New-Item -ItemType Directory -Force -Path "$clangDir\lib\clang\18.0.0"
+          }
+
+      - name: Cache Skia dependencies
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/vcpkg/installed
-          key: vcpkg-skia-clang-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          path: |
+            ${{ github.workspace }}/skia/third_party/externals
+            ${{ github.workspace }}/skia/out
+          key: skia-gn-aseprite-m102-${{ hashFiles('skia/DEPS') }}
           save-always: true
 
-      - name: Bootstrap vcpkg
-        shell: pwsh
-        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+      - name: Sync dependencies (git-sync-deps)
+        working-directory: skia
+        shell: cmd
+        run: python tools/git-sync-deps
 
-      # LLVM（用户要求：Skia 用 llvm 构建，不用 MSVC）。
-      # windows-latest 镜像预装 LLVM（C:\Program Files\LLVM），
-      # clang-cl 即 LLVM 的前端 + MSVC ABI/运行库。
-      - name: Add LLVM to PATH (clang-cl)
-        shell: pwsh
-        run: echo "C:\Program Files\LLVM\bin" | Out-File -Append $env:GITHUB_PATH
-
-      - name: Prepare clang-cl toolchain
-        shell: bash
+      - name: Generate build files with GN (LLVM x64)
+        working-directory: skia
+        shell: cmd
         run: |
-          cat > toolchain.cmake <<'EOF'
-          set(CMAKE_C_COMPILER "clang-cl")
-          set(CMAKE_CXX_COMPILER "clang-cl")
-          set(CMAKE_MT "mt")
-          EOF
-          cat toolchain.cmake
+          gn gen out/Release-x64 --args="is_debug=false is_official_build=true skia_use_system_expat=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=false skia_use_freetype=true skia_use_harfbuzz=true skia_pdf_subset_harfbuzz=true skia_use_system_freetype2=false skia_use_system_harfbuzz=false target_cpu=\"x64\" clang_win=\"C:\Program Files\LLVM\" win_vc=\"C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\" extra_cflags=[\"-MT\", \"-Wno-attributes\"]"
 
-      - name: Install dependencies (vcpkg.json manifest, clang-cl)
-        shell: pwsh
-        env:
-          VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
-        run: .\vcpkg\vcpkg.exe install --triplet x64-windows
+      - name: Build with Ninja
+        working-directory: skia
+        shell: cmd
+        run: |
+          ninja -C out/Release-x64 skia
 
-      - name: Fetch GLAD (CMakeLists:28 的 glad target 需要 third_party/glad/src/gl.c)
-        shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/fetch_deps.ps1 -SkipGLFW -SkipFreeType -SkipFiraCode
-
-      - name: Configure (WBWOPENGAL_API_SKIA=ON, ClangCL)
+      - name: Configure 14_skia (WBWOPENGAL_API_SKIA_DIR 直连 GN 产物, ClangCL)
         run: >
-          cmake -B build -A x64 -T ClangCL -DWBWOPENGAL_API_SKIA=ON
-          "-DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake"
+          cmake -B build -A x64 -T ClangCL
+          -DWBWOPENGAL_API_SKIA=ON
+          "-DWBWOPENGAL_API_SKIA_DIR=${{ github.workspace }}\skia\out\Release-x64"
 
       - name: Build 14_skia (Release)
         run: cmake --build build --target 14_skia --config Release
+
+      - name: Copy icudtl.dat (skia 运行时 ICU 数据)
+        shell: pwsh
+        run: Copy-Item "${{ github.workspace }}\skia\out\Release-x64\icudtl.dat" .\build\Release\
 
       - name: Run 14_skia (headless 像素校验 + BMP 导出)
         run: .\build\Release\14_skia.exe
