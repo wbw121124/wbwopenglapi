@@ -111,7 +111,10 @@
             GetGlyphIndices 直接接受 UCS-4 码点 ② ID2D1SimplifiedGeometrySink::Close
             返回 HRESULT ③ Segoe UI 无 CJK 字形且 DWrite 单字体不回退 → 实现
             主字体+双回退链（Segoe UI -> Arial -> 微软雅黑）
-- [ ] 步 3/4：整合 + 示例 13_dwrite_text（仿 05_text，含 -t 回归）+ README 构建章节 + 全量回归
+- [x] 步 3/4：整合 + 示例 13_dwrite_text（仿 05_text，含 -t 回归；无 DWrite 宏时
+      等同 05 可在三后端编译）+ README 构建章节/示例表/技术要点更新
+      → 验证：13 在 dwrite/gdi/freetype 三后端 -t 全绿；09-12 dwrite/gdi/freetype 回归全绿
+      排障：build 目录 glfw3.dll 曾被 12_antialias 残留进程占用（进程退出后自动恢复）
 - [ ] 步 4/4：Skia：vcpkg.json manifest + `WBWOPENGAL_API_SKIA` option + include/wbwopenglapi_skia.hpp
       （RasterSurface 封装）+ 示例 14_skia（条件编译，无窗口输出 BMP）+ 文档 + CI 验证 job
 
