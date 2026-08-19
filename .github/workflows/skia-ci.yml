@@ -1,7 +1,8 @@
 # skia-ci.yml - Skia 可选后端集成验证（软件栅格化, 无窗口）
 #   触发：推送 main 或手动 workflow_dispatch。
 #   目的：wbwopenglapi_skia.hpp + 示例 14_skia 的真实编译/运行验证。
-#   skia 端口首次安装约 15-30 分钟（大依赖），故独立于 release.yml。
+#   skia 端口首次安装约 15-30 分钟（大依赖），故独立于 release.yml，
+#   并缓存 vcpkg/installed 加速后续运行。
 #   只构建 14_skia target（无 GLFW/GL 依赖，仅链接 skia），不连锁其余示例。
 name: Skia CI
 
@@ -21,18 +22,30 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: vcpkg install skia (cached)
-        id: vcpkg
-        uses: lukka/run-vcpkg@v11
+      - name: Checkout vcpkg
+        uses: actions/checkout@v4
         with:
-          vcpkgGitCommitId: master
-          vcpkgDirectory: ${{ runner.workspace }}/vcpkg
-          vcpkgJsonGlob: '**/vcpkg.json'
+          repository: microsoft/vcpkg
+          path: vcpkg
+
+      - name: Cache vcpkg installed (skia 构建产物)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg/installed
+          key: vcpkg-skia-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Install dependencies (vcpkg.json manifest)
+        shell: pwsh
+        run: .\vcpkg\vcpkg.exe install --triplet x64-windows
 
       - name: Configure (WBWOPENGAL_API_SKIA=ON)
         run: >
           cmake -B build -DWBWOPENGAL_API_SKIA=ON
-          "-DCMAKE_TOOLCHAIN_FILE=${{ runner.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake"
+          "-DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake"
 
       - name: Build 14_skia (Release)
         run: cmake --build build --target 14_skia --config Release
