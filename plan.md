@@ -115,8 +115,31 @@
       等同 05 可在三后端编译）+ README 构建章节/示例表/技术要点更新
       → 验证：13 在 dwrite/gdi/freetype 三后端 -t 全绿；09-12 dwrite/gdi/freetype 回归全绿
       排障：build 目录 glfw3.dll 曾被 12_antialias 残留进程占用（进程退出后自动恢复）
-- [ ] 步 4/4：Skia：vcpkg.json manifest + `WBWOPENGAL_API_SKIA` option + include/wbwopenglapi_skia.hpp
-      （RasterSurface 封装）+ 示例 14_skia（条件编译，无窗口输出 BMP）+ 文档 + CI 验证 job
+- [x] 步 4/4：Skia：vcpkg.json manifest（仅 skia）+ `WBWOPENGAL_API_SKIA` option
+      （find_package(skia CONFIG) REQUIRED）+ include/wbwopenglapi_skia.hpp
+      （RasterSurface 封装：矩形/圆/路径/文本/变换/toRGBA top-down）
+      + 示例 14_skia（headless 像素校验 + BMP 导出正确行序范式）
+      + .github/workflows/skia-ci.yml（windows-msvc + vcpkg, push main 触发）
+      → 本机验证：无 skia 时 build.ps1 全量跳过 14 不受影响；-Example 14_skia
+      给出指引错误；CMake GLOB 排除 14 后三后端正常；SKIA=ON 无 vcpkg 时
+      find_package 正确 FATAL
+      遗留风险：wbwopenglapi_skia.hpp/14_skia.cpp 的真实编译与像素校验依赖
+      skia-ci.yml 的 MSVC+vcpkg job（首次安装 skia 端口约 15-30 分钟），
+      本机 MinGW 8.1 无法验证
+
+# 修复任务：BMP 导出方向颠倒
+
+## 目标
+- 修复 12_antialias 示例 test/*.bmp 导出上下颠倒（GL 与 BMP 同为自下而上，
+  旧实现画蛇添足再翻转一次）
+- 排查并修复 napi/ 的 toBMP（如存在同类问题）
+- 正确范式已由 14_skia.cpp 的 saveBmp 确立（内存 top-down -> BMP 自下而上翻转）
+
+## 步骤
+- [ ] 修复 12_antialias.cpp saveBmp：px 已为 bottom-up（glReadPixels 行 0 = 底部），
+      BMP 文件行 0 亦为底部 → 直接逐行拷贝即可，删去 (fh-1-y) 翻转
+- [ ] 排查 napi toBMP（src/*.cc 或 lib）行序语义并修复/验证
+- [ ] 全量回归 + README/plan 记录
 
 ## 排障记录
 （按步追加）

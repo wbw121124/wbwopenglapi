@@ -38,6 +38,10 @@ int main() {
   `font-feature-settings` 风格特性（liga / calt / cvNN / ssNN / zero 等），
   fontFeatures() 显式开启，默认全关、输出与无 HarfBuzz 时像素级一致
 - **纯标准库**：CSS 颜色解析、BMP 解码、粗线三角带生成均无第三方依赖
+- **Skia 软件栅格化（可选）**：`include/wbwopenglapi_skia.hpp` 提供 Canvas 2D 风格
+  子集（矩形/圆/路径/文本/变换），经 SkSurface::MakeRaster 纯 CPU 栅格化输出
+  top-down RGBA8，供无窗口/headless 渲染或 drawImage 前处理（集成不替换，
+  vcpkg `skia` 端口 + CMake `-DWBWOPENGAL_API_SKIA=ON`，需 MSVC 工具链）
 - **现代 OpenGL**：GL 3.3 core，CPU 端顶点变换 + stencil even-odd 填充，
   无弃用 API
 
@@ -74,6 +78,22 @@ DirectWrite 后端——与 GDI 相同的默认字体回退序列（Segoe UI -> 
 微软雅黑）与字形空间语义，且与 FreeType 互斥。定义 `WBWOPENGAL_API_FONT_HARFBUZZ`
 （Windows 链接 third_party/harfbuzz 自编译的 `libharfbuzz-0.dll`，仅依赖
 freetype.dll；Linux 经 pkg-config harfbuzz）后启用 OpenType 特性。
+
+### Skia（可选，软件栅格化）
+
+```
+# 需 MSVC + vcpkg（skia 端口约 15-30 分钟首次安装）
+cmake -B build -DWBWOPENGAL_API_SKIA=ON `
+  -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+cmake --build build --target 14_skia --config Release
+build\Release\14_skia.exe   # headless 像素校验 + 导出 test/14_skia.bmp
+```
+
+启用后额外构建示例 14_skia（无窗口无 GL 依赖，仅链接 skia）；
+`include/wbwopenglapi_skia.hpp` 的绘制语义与主库一致（左上原点 / y 向下 /
+RasterSurface 输出 top-down RGBA）。MinGW 8.1 无法构建 skia 端口
+（需 MSVC），故本机 build.ps1 不提供 14_skia；实际编译验证由
+`.github/workflows/skia-ci.yml`（windows-latest + MSVC + vcpkg）完成。
 
 ### Node.js（Node-API，napi/）
 
@@ -134,6 +154,7 @@ linux-x86 用 gcc -m32 + i386 系统库交叉，windows-x86 用 msys2 MINGW32 i6
 | 09_text_lines | 多行文本混排（中西文 / 对齐 / 基线 / 字体切换） |
 | 10_ligature | OpenType 特性：calt 连体 / cv02 / zero（需 Fira Code + HarfBuzz） |
 | 13_dwrite_text | DirectWrite 后端文本验证（fillText / strokeText / 中文回退；无 DWrite 宏时等同 05） |
+| 14_skia | Skia 软件栅格化验证（矩形/圆/路径/文本 -> headless BMP 导出；需 `-DWBWOPENGAL_API_SKIA=ON`） |
 
 所有示例支持 `-t` 测试模式：渲染 0.5 秒后逐像素校验，全部通过退出码 0。
 
@@ -208,7 +229,8 @@ HiDPI 自动按 framebuffer 尺寸适配。路径 fill 采用 stencil even-odd
   才调用 hb_shape。GDI 后端无连体（忽略 fontFeatures）
 - glTexImage2D 像素数组首行位于纹理坐标 v=0，drawImage 据此映射
   （画布顶 = v=0）
-- 依赖：GLFW 3.4 + GLAD（gl 3.3 core）+ 可选 FreeType + 可选 HarfBuzz；
+- 依赖：GLFW 3.4 + GLAD（gl 3.3 core）+ 可选 FreeType + 可选 HarfBuzz +
+  可选 DirectWrite（Windows 8.1+ 系统库）+ 可选 Skia（vcpkg）；
   其余纯标准库
 
 ## 目录结构
@@ -216,10 +238,11 @@ HiDPI 自动按 framebuffer 尺寸适配。路径 fill 采用 stencil even-odd
 ```
 wbwopenglapi/
 ├─ include/wbwopenglapi.hpp   # 唯一头文件：全部 API 实现
+│         wbwopenglapi_skia.hpp # Skia 软件栅格化封装（可选，WBWOPENGAL_API_SKIA）
 ├─ third_party/               # 依赖（gitignore）
 │  ├─ fonts/                  # Fira Code（10_ligature 用，fetch_deps 下载）
 │  └─ harfbuzz/               # HarfBuzz 自编译（fetch_deps.ps1 -HarfBuzz）
-├─ examples/                  # 01_hello ... 13_dwrite_text
+├─ examples/                  # 01_hello ... 14_skia（14 需 Skia 后端）；
 ├─ scripts/fetch_deps.ps1     # 下载依赖（Windows；-HarfBuzz 自编译 HarfBuzz）
 ├─ build.ps1                  # 一键构建（Windows/MinGW）
 ├─ CMakeLists.txt             # 跨平台构建
