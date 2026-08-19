@@ -97,6 +97,23 @@ c.close();
 构建链：cmake-js + MinGW Makefiles + cmake-runtime 提供的 cmake.exe。
 颜色参数支持 CSS 字符串、`{r,g,b,a}` 对象、`[r,g,b,a]` 数组（数值 0..255 或 0..1）。
 隐藏窗口无头渲染，HiDPI 下 framebuffer 可能非等比缩放（画布坐标保持逻辑像素）。
+类构造函数按 env 键控存储（`napi_set_instance_data`），worker_threads 多
+环境各自独立，黑白名单无共享状态。
+
+## 发布（GitHub Actions）
+
+推送 `v*` 标签（或手动 `workflow_dispatch`）触发 `.github/workflows/release.yml`，
+在 7 个平台组合上构建并发布两个包到 Releases：
+
+- `wbwopenglapi-<os>-<arch>.tar.gz`：核心包（header-only 库：include/ + CMakeLists/
+  README；Windows 额外含 glfw3.dll 与导入库）
+- `wbwopenglapi-napi-<os>-<arch>.tar.gz`：Node 插件（build/*.node + lib/index.js +
+  package.json，解压后 `npm install <tarball>` 可用）
+
+平台：linux / windows（amd64、x86）/ macos（amd64、arm64）全覆盖；
+windows arm64 无官方 MinGW 工具链与 runner，不提供。x86 无官方原生 runner：
+linux-x86 用 gcc -m32 + i386 系统库交叉，windows-x86 用 msys2 MINGW32 i686
+工具链（交叉产物不做运行时测试，x64 Node 无法加载 32 位插件）。
 
 ## 示例
 

@@ -73,6 +73,14 @@ else()
     message(FATAL_ERROR "非 Windows 平台必须启用 FreeType 后端: cmake -DWBWOPENGAL_API_FONT_FREETYPE=ON")
 endif()
 
+# ---------------- Node-API 插件（可选） ----------------
+# 启用后 napi/ 子目录以常规 CMake 模式构建（Linux/macOS 需系统 glfw/freetype；
+# Windows 请在 napi/ 下用 cmake-js 构建，见 napi/CMakeLists.txt 顶部说明）
+option(WBWOPENGAL_BUILD_NODE "构建 napi/ Node-API 插件（Linux/macOS）" OFF)
+if(WBWOPENGAL_BUILD_NODE)
+    add_subdirectory(napi)
+endif()
+
 # ---------------- 示例 ----------------
 file(GLOB WBWOPENGAL_EXAMPLES ${WBWOPENGAL_ROOT}/examples/*.cpp)
 foreach(src ${WBWOPENGAL_EXAMPLES})

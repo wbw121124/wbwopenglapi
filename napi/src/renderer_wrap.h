@@ -10,6 +10,24 @@
 
 namespace wbw_napi {
 
+// env 键控的类构造函数引用集：worker_threads 下每个 env 独立持有
+// （napi_ref 绑定创建它的 env，跨 env 使用不安全）。单槽位实例数据
+// 须用一个结构体承载两个类的引用；env 销毁时 SetInstanceData 默认
+// finalize 自动 delete。
+struct EnvRefs {
+    Napi::FunctionReference renderer;
+    Napi::FunctionReference image;
+};
+
+inline EnvRefs& envRefs(Napi::Env env) {
+    EnvRefs* refs = env.GetInstanceData<EnvRefs>();
+    if (!refs) {
+        refs = new EnvRefs();
+        env.SetInstanceData(refs);
+    }
+    return *refs;
+}
+
 // loadBMP(path) -> ImageHandle（RGBA 位图，无 GL 资源，析构安全）
 class ImageWrap : public Napi::ObjectWrap<ImageWrap> {
 public:
@@ -20,8 +38,8 @@ public:
     Napi::Value GetWidth(const Napi::CallbackInfo& i);
     Napi::Value GetHeight(const Napi::CallbackInfo& i);
 
-    // 类构造函数引用（addon 单实例；worker_threads 多 env 场景需改 env 键控存储）
-    static Napi::FunctionReference ctor;
+    // env 键控构造函数引用（见 EnvRefs）
+    static Napi::FunctionReference& Ctor(Napi::Env env);
 };
 
 // createCanvas(w, h) -> CanvasHandle（隐藏窗口 + 绘制上下文）
@@ -32,7 +50,8 @@ public:
     RendererWrap(const Napi::CallbackInfo& info);
     void Finalize(Napi::Env env) override; // GC 兜底：入 pending 队列延迟释放
 
-    static Napi::FunctionReference ctor;
+    // env 键控构造函数引用（见 EnvRefs）
+    static Napi::FunctionReference& Ctor(Napi::Env env);
 
 private:
     std::shared_ptr<Renderer> r_; // 为空 = 已 close

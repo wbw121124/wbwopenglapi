@@ -10,9 +10,16 @@
 
 namespace wbw_napi {
 
-// 静态构造函数引用（addon 单实例）
-Napi::FunctionReference ImageWrap::ctor;
-Napi::FunctionReference RendererWrap::ctor;
+// env 键控构造函数引用：worker_threads 下每个 env 独立持有自己的
+// FunctionReference（napi_ref 绑定创建它的 env）。SetInstanceData 的
+// 默认 finalize 在 env 销毁时自动 delete。
+Napi::FunctionReference& ImageWrap::Ctor(Napi::Env env) {
+    return envRefs(env).image;
+}
+
+Napi::FunctionReference& RendererWrap::Ctor(Napi::Env env) {
+    return envRefs(env).renderer;
+}
 
 // ---------------------------------------------------------------------
 // ImageWrap
@@ -25,7 +32,7 @@ void ImageWrap::Init(Napi::Env env, Napi::Object exports) {
         InstanceAccessor<&ImageWrap::GetHeight>("height"),
     };
     Napi::Function func = DefineClass(env, "ImageHandle", props);
-    ctor = Napi::Persistent(func);
+    Ctor(env) = Napi::Persistent(func);
     exports.Set("ImageHandle", func);
 }
 
@@ -115,17 +122,10 @@ void RendererWrap::RequireArgs(const Napi::CallbackInfo& i, size_t n,
     }
 }
 
-// CSS 字符串或 {r,g,b,a}（0..1）对象
+// CSS 字符串或 {r,g,b,a} 对象 / [r,g,b,a] 数组（整体判定 0..255 或 0..1 量纲）
 wbwopenglapi::Color RendererWrap::ColorArg(const Napi::CallbackInfo& i,
                                            size_t idx,
                                            const wbwopenglapi::Color& def) {
-    // 兼容：CSS 字符串 / {r,g,b,a} 对象 / [r,g,b,a] 数组；数值按 0..255 或 0..1 均可
-    const auto rgb = [](double x) {
-        return static_cast<float>(x > 1.0 ? x / 255.0 : x);
-    };
-    const auto alpha = [](double x) {
-        return static_cast<float>(x > 1.0 ? x / 255.0 : x);
-    };
     if (idx >= i.Length()) {
         return def;
     }
@@ -148,11 +148,17 @@ wbwopenglapi::Color RendererWrap::ColorArg(const Napi::CallbackInfo& i,
             }
             return x.As<Napi::Number>().DoubleValue();
         };
+        // r/g/b 整体判定量纲：任一分量 >1 视为 0..255 制（Canvas 规范），
+        // 全 ≤1 视为 0..1；a 固定 0..1 制（>1 兼容 0..255 写法）
+        const double q0 = num(0), q1 = num(1), q2 = num(2);
+        const double q3 = n >= 4 ? num(3) : 1.0;
+        const double mx = std::max(std::max(q0, q1), q2);
+        const double f = mx > 1.0 ? 1.0 / 255.0 : 1.0;
         wbwopenglapi::Color c;
-        c.r = rgb(num(0));
-        c.g = rgb(num(1));
-        c.b = rgb(num(2));
-        c.a = n >= 4 ? alpha(num(3)) : 1.0f;
+        c.r = static_cast<float>(q0 * f);
+        c.g = static_cast<float>(q1 * f);
+        c.b = static_cast<float>(q2 * f);
+        c.a = static_cast<float>(q3 > 1.0 ? q3 / 255.0 : q3);
         return c;
     }
     if (v.IsObject()) {
@@ -166,11 +172,20 @@ wbwopenglapi::Color RendererWrap::ColorArg(const Napi::CallbackInfo& i,
             throw Napi::TypeError::New(i.Env(),
                                        "wbwopenglapi: 颜色对象须含 r/g/b 数字");
         }
-        c.r = rgb(r.As<Napi::Number>().DoubleValue());
-        c.g = rgb(g.As<Napi::Number>().DoubleValue());
-        c.b = rgb(b.As<Napi::Number>().DoubleValue());
+        // r/g/b 整体判定量纲（同上）；a 固定 0..1 制（>1 兼容 0..255 写法）
+        const double q0 = r.As<Napi::Number>().DoubleValue();
+        const double q1 = g.As<Napi::Number>().DoubleValue();
+        const double q2 = b.As<Napi::Number>().DoubleValue();
+        const double q3 = a.IsNumber() ? a.As<Napi::Number>().DoubleValue() : 1.0;
+        const double mx = std::max(std::max(q0, q1), q2);
+        const double f = mx > 1.0 ? 1.0 / 255.0 : 1.0;
+        c.r = static_cast<float>(q0 * f);
+        c.g = static_cast<float>(q1 * f);
+        c.b = static_cast<float>(q2 * f);
         if (a.IsNumber()) {
-            c.a = alpha(a.As<Napi::Number>().DoubleValue());
+            c.a = static_cast<float>(q3 > 1.0 ? q3 / 255.0 : q3);
+        } else {
+            c.a = 1.0f;
         }
         return c;
     }
@@ -233,7 +248,7 @@ const std::vector<Napi::ClassPropertyDescriptor<RendererWrap>> props = {
             InstanceMethod("close", &RendererWrap::Close),
     };
     Napi::Function func = DefineClass(env, "CanvasHandle", props);
-    RendererWrap::ctor = Napi::Persistent(func);
+    RendererWrap::Ctor(env) = Napi::Persistent(func);
     exports.Set("CanvasHandle", func);
     exports.Set("createCanvas", Napi::Function::New(env, CreateCanvas));
     exports.Set("loadBMP", Napi::Function::New(env, LoadBmp));
@@ -272,7 +287,8 @@ Napi::Value RendererWrap::CreateCanvas(const Napi::CallbackInfo& info) {
             throw Napi::RangeError::New(env, "wbwopenglapi: 画布宽高必须为正数");
         }
         // 经类构造函数创建（RendererWrap 构造解析参数并初始化 GL，失败即抛）
-        return ctor.New({Napi::Number::New(env, w), Napi::Number::New(env, h)});
+        return RendererWrap::Ctor(env).New(
+            {Napi::Number::New(env, w), Napi::Number::New(env, h)});
     } catch (const Napi::Error& e) {
         // NAPI 异常（TypeError/RangeError）直接透传
         e.ThrowAsJavaScriptException();
@@ -290,7 +306,8 @@ Napi::Value RendererWrap::LoadBmp(const Napi::CallbackInfo& info) {
         RequireArgs(info, 1, "loadBMP");
         const std::string path = Str(info, 0, "");
         const wbwopenglapi::Image img = wbwopenglapi::loadBMP(path); // 失败抛异常
-        Napi::Object obj = ImageWrap::ctor.New({Napi::String::New(env, path)});
+        Napi::Object obj =
+            ImageWrap::Ctor(env).New({Napi::String::New(env, path)});
         ImageWrap::Unwrap(obj)->img = img;
         return obj;
     } catch (const Napi::Error& e) {

@@ -1,0 +1,171 @@
+# release.yml - 发布工作流
+#   触发：推送 v* 标签（如 v0.2.0）或手动 workflow_dispatch。
+#   产出（每个平台 2 个包，合并发布到 Releases）：
+#     wbwopenglapi-<os>-<arch>.tar.gz        核心包：include/（header-only 库）
+#                                              + CMakeLists/README + Windows DLL/导入库
+#     wbwopenglapi-napi-<os>-<arch>.tar.gz   Node 插件：build/*.node（+ 平台 DLL）
+#                                              + lib/index.js + package.json
+#   架构：amd64 / arm64 / x86；windows 无 arm64（无官方 arm64 MinGW 工具链与
+#   runner，GLFW 官方预编译也只发 x64/x86），其余 7 组合全覆盖。
+#   x86 无官方原生 runner：linux-x86 用 gcc -m32 + i386 系统库交叉（仅编译不运行
+#   测试，x64 Node 无法加载 32 位插件）；windows-x86 用 msys2 MINGW32 i686 工具链。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64,   runner: ubuntu-latest,    os: linux,   arch: amd64, native: true }
+          - { name: linux-arm64,   runner: ubuntu-24.04-arm, os: linux,   arch: arm64, native: true }
+          - { name: linux-x86,     runner: ubuntu-latest,    os: linux,   arch: x86,   native: false, multilib: '1' }
+          - { name: windows-amd64, runner: windows-latest,   os: windows, arch: amd64, native: true,  msystem: MINGW64 }
+          - { name: windows-x86,   runner: windows-latest,   os: windows, arch: x86,   native: false, msystem: MINGW32 }
+          - { name: macos-amd64,   runner: macos-13,         os: macos,   arch: amd64, native: true }
+          - { name: macos-arm64,   runner: macos-14,         os: macos,   arch: arm64, native: true }
+    env:
+      OST: ${{ matrix.os }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # ---------------- 系统构建依赖 ----------------
+      - name: Linux deps
+        if: matrix.os == 'linux'
+        run: |
+          set -e
+          sudo apt-get update
+          if [ "${{ matrix.multilib }}" = "1" ]; then
+            sudo dpkg --add-architecture i386
+            sudo apt-get update
+            sudo apt-get install -y gcc-multilib g++-multilib cmake xvfb pkg-config \
+              libglfw3-dev:i386 libfreetype6-dev:i386
+          else
+            sudo apt-get install -y cmake libglfw3-dev libfreetype6-dev xvfb
+          fi
+
+      - uses: msys2/setup-msys2@v2
+        if: matrix.os == 'windows'
+        with:
+          msystem: ${{ matrix.msystem }}
+          install: >-
+            ${{ matrix.arch == 'x86' && 'mingw-w64-i686-toolchain mingw-w64-i686-make' || 'mingw-w64-x86_64-toolchain mingw-w64-x86_64-make' }}
+
+      - name: macOS deps
+        if: matrix.os == 'macos'
+        run: brew install cmake glfw freetype
+
+      # ---------------- third_party（Windows 需下载；GLFW 官方预编译 WIN64/WIN32 按架构分包） ----------------
+      - name: Fetch GLFW + GLAD (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $third = Join-Path (Get-Location) 'third_party'
+          New-Item -ItemType Directory -Force -Path $third | Out-Null
+          $glUrl = 'https://github.com/glfw/glfw/releases/download/3.4'
+          foreach ($p in @('WIN64', 'WIN32')) {
+            $z = Join-Path $env:RUNNER_TEMP "glfw-$p.zip"
+            Invoke-WebRequest "$glUrl/glfw-3.4.bin.$p.zip" -OutFile $z
+            $ex = Join-Path $env:RUNNER_TEMP "glfw-$p"
+            Expand-Archive $z -DestinationPath $ex -Force
+            $root = (Get-ChildItem $ex -Directory | Select-Object -First 1).FullName
+            if (-not (Test-Path (Join-Path $third 'glfw\include\GLFW'))) {
+              New-Item -ItemType Directory -Force -Path (Join-Path $third 'glfw') | Out-Null
+              Copy-Item -Recurse -Force (Join-Path $root 'include\GLFW') (Join-Path $third 'glfw\include') 
+              Copy-Item -Force (Join-Path $root 'lib-mingw-w64\libglfw3dll.a') $third\glfw\
+              Copy-Item -Force (Join-Path $root 'lib-mingw-w64\glfw3.dll') $third\glfw\
+              Copy-Item -Force (Join-Path $root 'lib-mingw-w64\libglfw3.a') $third\glfw\
+              Copy-Item -Force (Join-Path $root 'LICENSE.md') $third\glfw\
+            }
+          }
+          # 32 位构建：全覆盖为 WIN32（i686）库与 DLL
+          if ('${{ matrix.arch }}' -eq 'x86') {
+            $ex = Join-Path $env:RUNNER_TEMP 'glfw-WIN32'
+            $root = (Get-ChildItem $ex -Directory | Select-Object -First 1).FullName
+            Copy-Item -Force (Join-Path $root 'lib-mingw-w64\libglfw3dll.a') $third\glfw\
+            Copy-Item -Force (Join-Path $root 'lib-mingw-w64\glfw3.dll') $third\glfw\
+            Copy-Item -Force (Join-Path $root 'lib-mingw-w64\libglfw3.a') $third\glfw\
+          }
+          # glad（fetch_deps 仅下载 glad；GLFW 已就绪）
+          & .\scripts\fetch_deps.ps1 -SkipGLFW -SkipFreeType
+
+      - name: MinGW 工具链入 PATH
+        if: matrix.os == 'windows'
+        run: echo "C:\msys64\${{ matrix.msystem }}\bin" | Out-File -Append $env:GITHUB_PATH
+
+      # ---------------- 构建 Node 插件 ----------------
+      - name: Build napi
+        working-directory: napi
+        env:
+          PKG_CONFIG_LIBDIR: ${{ matrix.arch == 'x86' && '/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig' || '' }}
+          CMAKE_JS_EXTRA_ARGS: ${{ matrix.arch == 'x86' && '-DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DCMAKE_SHARED_LINKER_FLAGS=-m32' || '' }}
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Test napi (native)
+        if: matrix.native == 'true'
+        working-directory: napi
+        run: |
+          if [ "$OST" = "linux" ]; then xvfb-run -a npm test; else npm test; fi
+
+      # ---------------- 打包 ----------------
+      - name: Package core
+        run: |
+          mkdir -p dist/core
+          cp -f README.md CMakeLists.txt dist/core/
+          cp -r include dist/core/
+          if [ -d third_party/glfw/include ]; then
+            mkdir -p dist/core/third_party/glfw
+            cp -r third_party/glfw/include dist/core/third_party/glfw/include
+            cp -r third_party/glad/include dist/core/third_party/glad/
+            cp -f third_party/glfw/glfw3.dll third_party/glfw/libglfw3dll.a dist/core/third_party/glfw/ || true
+          fi
+          tar -C dist/core -czf wbwopenglapi-$OST-$ARCH.tar.gz .
+
+      - name: Package napi
+        working-directory: napi
+        run: |
+          tar -czf ../wbwopenglapi-napi-$OST-$ARCH.tar.gz build lib package.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wbw-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            wbwopenglapi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+            wbwopenglapi-napi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wbw-*
+          path: pkgs
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: pkgs/wbw-*/*.tar.gz
+          generate_release_notes: true
