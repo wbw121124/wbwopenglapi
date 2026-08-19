@@ -26,10 +26,12 @@
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColor.h"
 #include "include/core/SkFont.h"
+#include "include/core/SkFontMgr.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkImageInfo.h"
 #include "include/core/SkPaint.h"
 #include "include/core/SkPath.h"
+#include "include/core/SkPathBuilder.h"
 #include "include/core/SkSurface.h"
 #include "include/core/SkTypeface.h"
 
@@ -38,14 +40,19 @@ namespace wbwopenglapi {
 // Skia 软件栅格化画布（Canvas 2D 风格子集）
 class SkiaCanvas {
 public:
+    // chrome/m* 分支工厂已迁至 SkSurfaces / SkTypeface 本体仅剩 MakeEmpty 等：
     explicit SkiaCanvas(int w, int h) : w_(w), h_(h) {
-        surf_ = SkSurface::MakeRasterN32Premul(w, h);
+        surf_ = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(w, h));
         if (!surf_) {
             throw std::runtime_error("wbwopenglapi_skia: SkSurface 创建失败");
         }
-        typeface_ = SkTypeface::MakeFromName("Segoe UI", SkFontStyle::Normal());
+        sk_sp<SkFontMgr> fm = SkFontMgr::RefDefault();
+        typeface_ = fm->matchFamilyStyle("Segoe UI", SkFontStyle::Normal());
         if (!typeface_) {
-            typeface_ = SkTypeface::MakeDefault();
+            typeface_ = fm->matchFamilyStyle(nullptr, SkFontStyle::Normal());
+        }
+        if (!typeface_) {
+            typeface_ = SkTypeface::MakeEmpty();
         }
     }
 
@@ -92,21 +99,25 @@ public:
     }
 
     // ---- 路径（beginPath 起新路径，语义同主库；arc 缺省顺时针）----
-    void beginPath() { path_.reset(); }
+    // chrome/m* 分支 SkPath 仅保留只读接口，路径构建统一走 SkPathBuilder
+    void beginPath() {
+        pathBuilder_.reset();
+        lastPath_ = SkPath();
+    }
     void moveTo(double x, double y) {
-        path_.moveTo(static_cast<SkScalar>(x), static_cast<SkScalar>(y));
+        pathBuilder_.moveTo(static_cast<SkScalar>(x), static_cast<SkScalar>(y));
     }
     void lineTo(double x, double y) {
-        path_.lineTo(static_cast<SkScalar>(x), static_cast<SkScalar>(y));
+        pathBuilder_.lineTo(static_cast<SkScalar>(x), static_cast<SkScalar>(y));
     }
     void quadraticCurveTo(double cx, double cy, double x, double y) {
-        path_.quadTo(static_cast<SkScalar>(cx), static_cast<SkScalar>(cy),
-                     static_cast<SkScalar>(x), static_cast<SkScalar>(y));
+        pathBuilder_.quadTo(static_cast<SkScalar>(cx), static_cast<SkScalar>(cy),
+                            static_cast<SkScalar>(x), static_cast<SkScalar>(y));
     }
     void bezierCurveTo(double c1x, double c1y, double c2x, double c2y, double x, double y) {
-        path_.cubicTo(static_cast<SkScalar>(c1x), static_cast<SkScalar>(c1y),
-                      static_cast<SkScalar>(c2x), static_cast<SkScalar>(c2y),
-                      static_cast<SkScalar>(x), static_cast<SkScalar>(y));
+        pathBuilder_.cubicTo(static_cast<SkScalar>(c1x), static_cast<SkScalar>(c1y),
+                             static_cast<SkScalar>(c2x), static_cast<SkScalar>(c2y),
+                             static_cast<SkScalar>(x), static_cast<SkScalar>(y));
     }
     void arc(double cx, double cy, double r, double a0, double a1, bool ccw = false) {
         double sweep = a1 - a0;
@@ -115,13 +126,22 @@ public:
         }
         // 角度转度（Skia sweep 正值顺时针）；范围归一化避免极值
         SkScalar sweepDeg = static_cast<SkScalar>(sweep * 180.0 / 3.141592653589793);
-        path_.arcTo(SkRect::MakeXYWH(static_cast<SkScalar>(cx - r), static_cast<SkScalar>(cy - r),
-                                     static_cast<SkScalar>(r * 2.0), static_cast<SkScalar>(r * 2.0)),
-                    static_cast<SkScalar>(a0 * 180.0 / 3.141592653589793), sweepDeg, true);
+        pathBuilder_.arcTo(SkRect::MakeXYWH(static_cast<SkScalar>(cx - r), static_cast<SkScalar>(cy - r),
+                                            static_cast<SkScalar>(r * 2.0), static_cast<SkScalar>(r * 2.0)),
+                           static_cast<SkScalar>(a0 * 180.0 / 3.141592653589793), sweepDeg, true);
     }
-    void closePath() { path_.close(); }
-    void fill() { canvas()->drawPath(path_, paint_); }
-    void stroke() { canvas()->drawPath(path_, paint_); }
+    void closePath() { pathBuilder_.close(); }
+    // fill/stroke 复用同一路径：首次 detach 出 SkPath 后缓存，后续操作沿用（语义同旧版）
+    void fill() {
+        lastPath_ = pathBuilder_.detach();
+        canvas()->drawPath(lastPath_, paint_);
+    }
+    void stroke() {
+        if (lastPath_.isEmpty()) {
+            lastPath_ = pathBuilder_.detach();
+        }
+        canvas()->drawPath(lastPath_, paint_);
+    }
 
     // ---- 变换（后调用先应用，同主库）----
     void translate(double dx, double dy) {
@@ -135,7 +155,7 @@ public:
     void font(double sizePx) { fontPx_ = sizePx; }
     void fillText(const std::string& text, double x, double y) {
         SkFont f(typeface_, static_cast<SkScalar>(fontPx_));
-        canvas()->drawString(text, static_cast<SkScalar>(x), static_cast<SkScalar>(y), f, paint_);
+        canvas()->drawString(text.c_str(), static_cast<SkScalar>(x), static_cast<SkScalar>(y), f, paint_);
     }
 
     // 输出 top-down RGBA8（行 0 = 图像顶部；与 glReadPixels 的 bottom-up 相反）
@@ -159,7 +179,8 @@ private:
     int h_ = 0;
     sk_sp<SkSurface> surf_;
     SkPaint paint_;
-    SkPath path_;
+    SkPathBuilder pathBuilder_;
+    SkPath lastPath_;
     double fontPx_ = 16.0;
     sk_sp<SkTypeface> typeface_;
 };
