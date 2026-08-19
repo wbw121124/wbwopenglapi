@@ -13,7 +13,7 @@ on:
 
 jobs:
   skia-smoke:
-    name: windows-amd64 (MSVC + vcpkg skia)
+    name: windows-amd64 (LLVM/clang-cl + vcpkg skia)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,28 +28,45 @@ jobs:
           repository: microsoft/vcpkg
           path: vcpkg
 
-      - name: Cache vcpkg installed (skia 构建产物)
+      - name: Cache vcpkg installed (clang 构建产物)
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/vcpkg/installed
-          key: vcpkg-skia-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-skia-clang-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
           save-always: true
 
       - name: Bootstrap vcpkg
         shell: pwsh
         run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
-      - name: Install dependencies (vcpkg.json manifest)
+      # LLVM（用户要求：Skia 用 llvm 构建，不用 MSVC）。
+      # windows-latest 镜像预装 LLVM（C:\Program Files\LLVM），
+      # clang-cl 即 LLVM 的前端 + MSVC ABI/运行库。
+      - name: Add LLVM to PATH (clang-cl)
         shell: pwsh
-        run: .\vcpkg\vcpkg.exe install --triplet x64-windows
+        run: echo "C:\Program Files\LLVM\bin" | Out-File -Append $env:GITHUB_PATH
+
+      - name: Prepare clang-cl toolchain
+        shell: bash
+        run: |
+          cat > toolchain.cmake <<'EOF'
+          set(CMAKE_C_COMPILER "clang-cl")
+          set(CMAKE_CXX_COMPILER "clang-cl")
+          set(CMAKE_MT "mt")
+          EOF
+          cat toolchain.cmake
+
+      - name: Install dependencies (vcpkg.json manifest, clang-cl)
+        shell: pwsh
+        run: .\vcpkg\vcpkg.exe install --triplet x64-windows --chainload-toolchain toolchain.cmake
 
       - name: Fetch GLAD (CMakeLists:28 的 glad target 需要 third_party/glad/src/gl.c)
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/fetch_deps.ps1 -SkipGLFW -SkipFreeType -SkipFiraCode
 
-      - name: Configure (WBWOPENGAL_API_SKIA=ON)
+      - name: Configure (WBWOPENGAL_API_SKIA=ON, ClangCL)
         run: >
-          cmake -B build -DWBWOPENGAL_API_SKIA=ON
+          cmake -B build -A x64 -T ClangCL -DWBWOPENGAL_API_SKIA=ON
           "-DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake"
 
       - name: Build 14_skia (Release)
