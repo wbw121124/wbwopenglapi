@@ -108,7 +108,11 @@ if(WBWOPENGAL_API_SKIA)
     target_include_directories(14_skia PRIVATE ${WBWOPENGAL_ROOT}/include)
     target_compile_definitions(14_skia PRIVATE WBWOPENGAL_API_SKIA)
     if(WBWOPENGAL_API_SKIA_DIR)
-        target_include_directories(14_skia PRIVATE ${WBWOPENGAL_API_SKIA_DIR}/include)
+        # wbwopenglapi_skia.hpp 用引号形式 #include "include/core/SkCanvas.h"（include 根 = SKIA_DIR，
+        # 如 GN out 目录/包内 skia/）；部分用户代码用 <core/...>（根 = SKIA_DIR/include），两条都加。
+        target_include_directories(14_skia PRIVATE
+            ${WBWOPENGAL_API_SKIA_DIR}
+            ${WBWOPENGAL_API_SKIA_DIR}/include)
         if(WIN32)
             file(GLOB WBWOPENGAL_SKIA_LIBS "${WBWOPENGAL_API_SKIA_DIR}/*.lib")
         else()
