@@ -226,6 +226,7 @@ jobs:
         with:
           path: ${{ github.workspace }}/vcpkg_installed
           key: skia-${{ matrix.triplet }}-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          save-always: true
 
       - name: Bootstrap vcpkg
         shell: pwsh

@@ -33,6 +33,7 @@ jobs:
         with:
           path: ${{ github.workspace }}/vcpkg/installed
           key: vcpkg-skia-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          save-always: true
 
       - name: Bootstrap vcpkg
         shell: pwsh
@@ -41,6 +42,10 @@ jobs:
       - name: Install dependencies (vcpkg.json manifest)
         shell: pwsh
         run: .\vcpkg\vcpkg.exe install --triplet x64-windows
+
+      - name: Fetch GLAD (CMakeLists:28 的 glad target 需要 third_party/glad/src/gl.c)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/fetch_deps.ps1 -SkipGLFW -SkipFreeType -SkipFiraCode
 
       - name: Configure (WBWOPENGAL_API_SKIA=ON)
         run: >
