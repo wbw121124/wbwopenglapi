@@ -104,7 +104,13 @@
       `WBWOPENGAL_API_FONT_DWRITE` option（Windows-only，与 FreeType 互斥）
       → 验证：dwrite 后端编译 05_text 通过；09_text_lines -t 回归 7 项全绿
       （本步宏未接入头文件前回落 GDI 路径，故过渡期保留 gdi32 链接）
-- [ ] 步 2/4：DirectWrite 封装层：FontFace 第三后端分支（工厂/字体/度量/字形轮廓收集器/advance）
+- [x] 步 2/4：DirectWrite 封装层：FontFace 第三后端分支（工厂/系统字体默认序列/文件字体/
+      度量/字形轮廓收集器 DwOutlineSink/advance）+ 字形回退链
+      → 验证：三个后端全量编译通过；09-12 -t 回归 dwrite/gdi/freetype 全绿
+      排障：① dwrite.h 中 GetGlyphRunOutline 为 8 参版本（glyphCount 独立传）；
+            GetGlyphIndices 直接接受 UCS-4 码点 ② ID2D1SimplifiedGeometrySink::Close
+            返回 HRESULT ③ Segoe UI 无 CJK 字形且 DWrite 单字体不回退 → 实现
+            主字体+双回退链（Segoe UI -> Arial -> 微软雅黑）
 - [ ] 步 3/4：整合 + 示例 13_dwrite_text（仿 05_text，含 -t 回归）+ README 构建章节 + 全量回归
 - [ ] 步 4/4：Skia：vcpkg.json manifest + `WBWOPENGAL_API_SKIA` option + include/wbwopenglapi_skia.hpp
       （RasterSurface 封装）+ 示例 14_skia（条件编译，无窗口输出 BMP）+ 文档 + CI 验证 job

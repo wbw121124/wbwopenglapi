@@ -3,14 +3,16 @@
 // wbwopenglapi - header-only C++17 库
 // 目标: 让 C++ 的 OpenGL 编程体验接近 JavaScript Canvas 2D API
 //
-// 依赖: GLFW 3.3+ / GLAD (gl:core=3.3) / (可选) FreeType / (可选) HarfBuzz
+// 依赖: GLFW 3.3+ / GLAD (gl:core=3.3) / (可选) FreeType / (可选) HarfBuzz / (可选) DirectWrite
 //   字体后端选择:
 //     - 定义宏 WBWOPENGAL_API_FONT_FREETYPE: 使用 FreeType (Linux 必需, Windows 可选)
+//     - 定义宏 WBWOPENGAL_API_FONT_DWRITE (仅 Windows 8.1+): 使用 DirectWrite 系统库
 //     - 未定义且 _WIN32: 使用系统 GDI 矢量字体 (Windows 默认)
 //     - 未定义且非 Windows: 编译错误
 //   OpenType 特性/连体（fontFeatures + HarfBuzz 整形）:
 //     - 需同时定义 WBWOPENGAL_API_FONT_FREETYPE 与 WBWOPENGAL_API_FONT_HARFBUZZ
 //     - GDI 后端不支持 GSUB 特性（fontFeatures 惰性，仅 FreeType+HarfBuzz 生效）
+//     - DirectWrite 后端不支持 GSUB 特性（同 GDI 语义）
 //
 // 使用示例:
 //   wbwopenglapi::Window win(800, 600, "Demo");
@@ -35,6 +37,19 @@
 #include <harfbuzz/hb.h>
 #include <harfbuzz/hb-ft.h>
 #endif
+#elif defined(WBWOPENGAL_API_FONT_DWRITE) && defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+// DirectWrite 字体后端（Windows 8.1+ 系统库，链接 -ldwrite）:
+// IDWriteGeometrySink 自 Win8.1 起为 ID2D1SimplifiedGeometrySink 的别名（见 dwrite.h），
+// 此处仅引入 d2d1_1.h 取接口定义；几何 sink 由本库实现，不链接 d2d1/d3d11
+#include <dwrite.h>
+#include <d2d1_1.h>
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -469,7 +484,7 @@ inline uint32_t utf8Next(const std::string& s, size_t& i) {
 class FontFace {
 public:
     explicit FontFace(int sizePx) : FontFace("", sizePx) {}
-    // file 为空时使用默认字体（GDI 忽略 file 参数，用系统默认字体）
+    // file 为空时使用默认字体（GDI/DirectWrite 用系统默认字体序列；FreeType 用内置字体目录）
     FontFace(const std::string& file, int sizePx) { init(file, sizePx); }
     ~FontFace() { destroy(); }
     FontFace(const FontFace&) = delete;
@@ -482,7 +497,7 @@ public:
 
     // 加载字形轮廓（缺字形返回空 outline）
     Glyph loadGlyph(uint32_t cp) const;
-    // 按字形索引加载（连体等无码点映射的字形；GDI 后端恒返回空）
+    // 按字形索引加载（连体等无码点映射的字形；GDI/DirectWrite 后端恒返回空）
     Glyph loadGlyphIndex(uint32_t idx) const;
     // HarfBuzz 整形（仅 FreeType+HarfBuzz 编译配置；否则返回空）
     std::vector<ShapedGlyph> shape(
@@ -499,6 +514,13 @@ private:
 #if defined(WBWOPENGAL_API_FONT_HARFBUZZ)
     hb_font_t* hbFont_ = nullptr;
 #endif
+#elif defined(WBWOPENGAL_API_FONT_DWRITE)
+    IDWriteFactory* dwFact_ = nullptr;
+    IDWriteFontFace* dwFace_ = nullptr;
+    // 字形回退链（Segoe UI -> Arial -> 微软雅黑），主字体缺字形时顺次尝试
+    IDWriteFontFace* dwFallbacks_[2] = {nullptr, nullptr};
+    // 设计单位/em（getDesignGlyphMetrics 输出的设计单位 -> 1/64 像素的换算基准）
+    double upem_ = 64.0;
 #else
     HDC dc_ = nullptr;
     HFONT font_ = nullptr;
@@ -789,6 +811,77 @@ inline void FontFace::init(const std::string& file, int sizePx) {
     // hb_ft_font 继承 FT 的缩放（1/64 像素单位），position 与 advanceX 单位一致
     hbFont_ = hb_ft_font_create_referenced(face_);
 #endif
+#elif defined(WBWOPENGAL_API_FONT_DWRITE)
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(&dwFact_)))) {
+        throw std::runtime_error("wbwopenglapi: DirectWrite 工厂创建失败");
+    }
+    if (file.empty()) {
+        // 系统字体集合默认字体（回退序列与 GDI 后端一致: Segoe UI -> Arial -> 微软雅黑；
+        // 主字体缺字形时由 loadGlyph 顺次尝试回退字体，见 dwFallbacks_）
+        IDWriteFontCollection* col = nullptr;
+        if (SUCCEEDED(dwFact_->GetSystemFontCollection(&col, TRUE))) {
+            const wchar_t* families[] = {L"Segoe UI", L"Arial", L"Microsoft YaHei UI"};
+            IDWriteFontFace** slot = &dwFace_;
+            for (const wchar_t* fn : families) {
+                UINT32 idx = 0;
+                BOOL exists = FALSE;
+                if (SUCCEEDED(col->FindFamilyName(fn, &idx, &exists)) && exists) {
+                    IDWriteFontFamily* fam = nullptr;
+                    if (SUCCEEDED(col->GetFontFamily(idx, &fam))) {
+                        IDWriteFont* font = nullptr;
+                        if (SUCCEEDED(fam->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL,
+                                                                DWRITE_FONT_STRETCH_NORMAL,
+                                                                DWRITE_FONT_STYLE_NORMAL,
+                                                                &font))) {
+                            font->CreateFontFace(slot);
+                            font->Release();
+                            if (*slot && slot != &dwFallbacks_[1]) {
+                                slot = (slot == &dwFace_) ? &dwFallbacks_[0] : &dwFallbacks_[1];
+                            }
+                        }
+                        fam->Release();
+                    }
+                }
+            }
+            col->Release();
+        }
+        if (!dwFace_) {
+            destroy();
+            throw std::runtime_error("wbwopenglapi: DirectWrite 未找到可用系统字体");
+        }
+    } else {
+        // UTF-8 -> UTF-16 文件路径
+        std::wstring wpath;
+        const int wn = MultiByteToWideChar(CP_UTF8, 0, file.c_str(), -1, nullptr, 0);
+        if (wn <= 0) {
+            destroy();
+            throw std::runtime_error("wbwopenglapi: 字体路径编码转换失败");
+        }
+        wpath.resize(static_cast<size_t>(wn) - 1);
+        MultiByteToWideChar(CP_UTF8, 0, file.c_str(), -1, &wpath[0], wn);
+        IDWriteFontFile* ff = nullptr;
+        if (FAILED(dwFact_->CreateFontFileReference(wpath.c_str(), nullptr, &ff))) {
+            destroy();
+            throw std::runtime_error("wbwopenglapi: DirectWrite 无法打开字体文件 \"" + file + "\"");
+        }
+        const HRESULT hr = dwFact_->CreateFontFace(DWRITE_FONT_FACE_TYPE_TRUETYPE, 1, &ff, 0,
+                                                   DWRITE_FONT_SIMULATIONS_NONE, &dwFace_);
+        ff->Release();
+        if (FAILED(hr) || !dwFace_) {
+            destroy();
+            throw std::runtime_error("wbwopenglapi: DirectWrite 无法创建字体 \"" + file + "\"");
+        }
+    }
+    // 度量: 设计单位 -> 1/64 像素（× sizePx / upem × 64；descender 为负，与 GDI 语义一致）
+    DWRITE_FONT_METRICS m = {};
+    dwFace_->GetMetrics(&m);
+    if (m.designUnitsPerEm > 0) {
+        upem_ = static_cast<double>(m.designUnitsPerEm);
+    }
+    const double sc = static_cast<double>(sizePx) * 64.0 / upem_;
+    ascender_ = static_cast<double>(m.ascent) * sc;
+    descender_ = -static_cast<double>(m.descent) * sc;
 #else
     (void)file;
     dc_ = CreateCompatibleDC(nullptr);
@@ -835,6 +928,21 @@ inline void FontFace::destroy() {
     if (lib_) {
         FT_Done_FreeType(lib_);
         lib_ = nullptr;
+    }
+#elif defined(WBWOPENGAL_API_FONT_DWRITE)
+    if (dwFace_) {
+        dwFace_->Release();
+        dwFace_ = nullptr;
+    }
+    for (IDWriteFontFace*& f : dwFallbacks_) {
+        if (f) {
+            f->Release();
+            f = nullptr;
+        }
+    }
+    if (dwFact_) {
+        dwFact_->Release();
+        dwFact_ = nullptr;
     }
 #else
     if (font_) {
@@ -969,6 +1077,95 @@ inline std::vector<ShapedGlyph> FontFace::shape(
 }
 
 #endif
+
+#elif defined(WBWOPENGAL_API_FONT_DWRITE)
+
+// IDWriteGeometrySink 实现: 收集 GetGlyphRunOutline 输出的绝对坐标轮廓
+// （像素单位、y 向下）-> PathSeg（1/64 像素、y 向上，与 FreeType/GDI 统一）。
+// 注意: 仅实现接口签名，D2D1_FILL_MODE/D2D1_PATH_SEGMENT 不参与收集
+struct DwOutlineSink : IDWriteGeometrySink {
+    std::vector<PathSeg>& out;
+    explicit DwOutlineSink(std::vector<PathSeg>& o) : out(o) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** ppv) override {
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    void STDMETHODCALLTYPE SetFillMode(D2D1_FILL_MODE) override {}
+    void STDMETHODCALLTYPE SetSegmentFlags(D2D1_PATH_SEGMENT) override {}
+    void STDMETHODCALLTYPE BeginFigure(D2D1_POINT_2F start, D2D1_FIGURE_BEGIN) override {
+        out.push_back({PathCmd::MoveTo, start.x * 64.0f, -start.y * 64.0f});
+    }
+    void STDMETHODCALLTYPE AddLines(const D2D1_POINT_2F* pts, UINT n) override {
+        for (UINT i = 0; i < n; ++i) {
+            out.push_back({PathCmd::LineTo, pts[i].x * 64.0f, -pts[i].y * 64.0f});
+        }
+    }
+    void STDMETHODCALLTYPE AddBeziers(const D2D1_BEZIER_SEGMENT* segs, UINT n) override {
+        for (UINT i = 0; i < n; ++i) {
+            out.push_back({PathCmd::CubicTo,
+                           segs[i].point1.x * 64.0f, -segs[i].point1.y * 64.0f,
+                           segs[i].point2.x * 64.0f, -segs[i].point2.y * 64.0f,
+                           segs[i].point3.x * 64.0f, -segs[i].point3.y * 64.0f});
+        }
+    }
+    void STDMETHODCALLTYPE EndFigure(D2D1_FIGURE_END) override {}
+    STDMETHODIMP Close() override { return S_OK; }
+};
+
+inline Glyph FontFace::loadGlyph(uint32_t cp) const {
+    Glyph g;
+    if (!dwFace_) {
+        return g;
+    }
+    // 主字体缺字形（gidx==0）时顺次尝试回退链（Segoe UI -> Arial -> 微软雅黑）
+    IDWriteFontFace* f = dwFace_;
+    UINT16 gidx = 0;
+    for (;;) {
+        if (FAILED(f->GetGlyphIndices(&cp, 1, &gidx))) {
+            gidx = 0;
+        }
+        if (gidx != 0) {
+            break;
+        }
+        f = (f == dwFace_) ? dwFallbacks_[0]
+                           : (f == dwFallbacks_[0]) ? dwFallbacks_[1] : nullptr;
+        if (!f) {
+            break;
+        }
+    }
+    if (!f || gidx == 0) {
+        return g; // 全链缺字形（与 GDI 语义一致: 返回空轮廓）
+    }
+    DwOutlineSink sink(g.outline);
+    // emSize = sizePx（像素单位）; isSideways/isRightToLeft = FALSE
+    if (FAILED(f->GetGlyphRunOutline(static_cast<FLOAT>(sizePx_), &gidx, nullptr,
+                                     nullptr, 1, FALSE, FALSE, &sink))) {
+        g.outline.clear();
+        return g;
+    }
+    // advance: 设计单位 -> 1/64 像素（× sizePx / upem × 64；upem 按实际字体取）
+    DWRITE_GLYPH_METRICS gm = {};
+    if (SUCCEEDED(f->GetDesignGlyphMetrics(&gidx, 1, &gm, FALSE))) {
+        DWRITE_FONT_METRICS m = {};
+        f->GetMetrics(&m);
+        if (m.designUnitsPerEm > 0) {
+            g.advanceX = static_cast<double>(gm.advanceWidth) *
+                         static_cast<double>(sizePx_) * 64.0 /
+                         static_cast<double>(m.designUnitsPerEm);
+        }
+    }
+    return g;
+}
+
+// DWrite 后端无字形索引/GSUB 接口（连体与特性不可用，同 GDI 语义）
+inline Glyph FontFace::loadGlyphIndex(uint32_t) const { return {}; }
+
+inline std::vector<ShapedGlyph> FontFace::shape(
+    const std::string&, const std::vector<std::pair<std::string, bool>>&) const {
+    return {};
+}
 
 #else // GDI 后端
 
