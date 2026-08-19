@@ -150,3 +150,45 @@
 
 ## 排障记录
 （按步追加）
+
+# 发布任务：GitHub Actions 打包头文件+库（Skia 用 LLVM）+ napi → Releases
+
+## 目标
+- 重写/扩展 .github/workflows/release.yml：核心头文件包 + Skia 库包（**LLVM 构建**）
+  + napi 包，3 平台（linux/windows/macos）× 架构（amd64/arm64/x86）全矩阵，发布到 Releases
+- 本任务不触碰 C++ 代码；改动仅 workflow + README + plan
+
+## 事实核查
+- runner：`windows-11-vs2026-arm`（Windows 11 ARM64 + VS2026 Enterprise，公开预览，
+  含 LLVM 20.1.6/CMake 4.3.3/Node 24.16/Python 3.13，公开仓库免费）→ windows-arm64 可行
+- vcpkg skia 端口 Supports = `!(windows & arm32) & !mingw` → arm64-windows、x86-windows/
+  x86-linux、x64/arm64 全支持；**mingw 一律不可用**（Windows 只能 MSVC 或 clang-cl）
+- macos 无 x86（2018 起无 32 位工具链）；vcpkg 无 x86-osx triplet
+- 现有 release.yml 的 Windows 打包/测试步骤用 bash 语法但缺 `shell: bash`（pwsh 解析
+  `if [ ... ]` 必失败）→ 一并修复
+
+## 方案（1 个 workflow，3 个 job）
+- `build` job（8 组合）：现 7 组合 + windows-arm64（napi=false：ARM64 交叉 Node 插件
+  暂不打包；纯头文件打包无编译，不走 msys2/GLFW 下载）；补 shell: bash
+- `skia` job（8 组合，独立）：
+  - LLVM 工具链：Windows = clang-cl（LLVM 预装 + MSVC 运行库）chainload-toolchain；
+    Linux/macOS = 系统 clang；linux-x86 加 -m32（gcc-multilib+libc6-dev-i386）
+  - vcpkg manifest 安装（triplet 矩阵：x64-linux/arm64-linux/x86-linux/
+    x64-windows/x86-windows/arm64-windows/x64-osx/arm64-osx），installed 缓存
+  - 打包 wbwopenglapi-skia-<os>-<arch>.tar.gz：wbwopenglapi.hpp/_skia.hpp + skia 全量
+    include/lib/bin + README-SKIA.md（含 CMake 用法）；x86 两组合 continue-on-error
+    （实验性），amd64/arm64 为正式产物
+- `release` job：needs [build, skia]，tag 触发；download-artifact merge-multiple →
+  softprops/action-gh-release 上传 pkgs/*.tar.gz（draft/pre-release 手工置位）
+- 平台表：linux(amd64/arm64/x86) + windows(amd64/x86/arm64) + macos(amd64/arm64) = 8 组合
+
+## 步骤（每步：更新本文 → git add（仅该步文件）→ commit → push）
+- [ ] 步 1/2：重写 release.yml（build 8 组合 + napi 开关 + shell: bash 修复；
+      skia job LLVM chainload + 打包；release 聚合）+ README 发布章节更新
+      → 验证：本地 yaml 语法检查 + 推送后触发 workflow_dispatch 观察 8+8 组合启动
+      （在推送时一并触发或告知手动触发）
+- [ ] 步 2/2：跑通验证：观察 CI 各 job；skia 首建走缓存后的二次运行缓存命中；
+      修正矩阵/工具链问题；最后 tag v0.?.? 发布一次验证产物齐全
+
+## 排障记录
+（按步追加）

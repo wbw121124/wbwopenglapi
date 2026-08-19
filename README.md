@@ -128,17 +128,23 @@ c.close();
 ## 发布（GitHub Actions）
 
 推送 `v*` 标签（或手动 `workflow_dispatch`）触发 `.github/workflows/release.yml`，
-在 7 个平台组合上构建并发布两个包到 Releases：
+在 8 个平台组合上构建并发布三个包到 Releases：
 
 - `wbwopenglapi-<os>-<arch>.tar.gz`：核心包（header-only 库：include/ + CMakeLists/
-  README；Windows 额外含 glfw3.dll 与导入库）
+  README；Windows x64/x86 额外含 glfw3.dll 与导入库）
 - `wbwopenglapi-napi-<os>-<arch>.tar.gz`：Node 插件（build/*.node + lib/index.js +
   package.json，解压后 `npm install <tarball>` 可用）
+- `wbwopenglapi-skia-<os>-<arch>.tar.gz`：Skia 库包（LLVM 构建：Windows 为
+  clang-cl + MSVC 运行库，Linux/macOS 为系统 clang；内含 wbwopenglapi.hpp /
+  wbwopenglapi_skia.hpp + skia 全量 include/lib/bin，配合
+  `-DWBWOPENGAL_API_SKIA=ON` 使用，无需 vcpkg）
 
-平台：linux / windows（amd64、x86）/ macos（amd64、arm64）全覆盖；
-windows arm64 无官方 MinGW 工具链与 runner，不提供。x86 无官方原生 runner：
-linux-x86 用 gcc -m32 + i386 系统库交叉，windows-x86 用 msys2 MINGW32 i686
-工具链（交叉产物不做运行时测试，x64 Node 无法加载 32 位插件）。
+平台：linux / windows / macos ×（amd64、arm64），另加 linux-x86 与 windows-x86
+（32 位，实验性 skia 包）。windows-arm64 使用 `windows-11-vs2026-arm`（ARM64
+原生 runner）产出核心包与 skia 包；napi 目前仅提供 amd64/x86（ARM64 交叉 Node
+插件需对应架构工具链，暂不打包）。x86 无官方原生 runner：linux-x86 用 gcc -m32
++ i386 系统库交叉，windows-x86 用 msys2 MINGW32 i686 工具链（交叉产物不做运行时
+测试，x64 Node 无法加载 32 位插件）。macos 自 2018 起无 32 位工具链，不提供 x86。
 
 ## 示例
 
