@@ -136,10 +136,17 @@
 - 正确范式已由 14_skia.cpp 的 saveBmp 确立（内存 top-down -> BMP 自下而上翻转）
 
 ## 步骤
-- [ ] 修复 12_antialias.cpp saveBmp：px 已为 bottom-up（glReadPixels 行 0 = 底部），
-      BMP 文件行 0 亦为底部 → 直接逐行拷贝即可，删去 (fh-1-y) 翻转
-- [ ] 排查 napi toBMP（src/*.cc 或 lib）行序语义并修复/验证
-- [ ] 全量回归 + README/plan 记录
+- [x] 修复 12_antialias.cpp saveBmp：glReadPixels 与 BMP 同为自下而上（行 0 = 图像
+      底部），旧代码 (fh-1-y) 画蛇添足翻转导致导出上下颠倒 → 逐行直拷
+- [x] 修复 napi/src/bmp.cc encodeBmp 同类问题（bmp.cc:70 同样多翻一次）
+      → node 像素验证：顶部红色/底部背景正确
+- [x] 测试增强：napi/test/basic.test.mjs toBMP 增加行序断言（按 BMP 头实际尺寸
+      解析，兼容 HiDPI framebuffer 缩放）；npm test 10 项全绿 + smoke 通过
+- [x] 验证：12_antialias -t 全绿；test/*.bmp 像素抽查（圆心绿/斜线红/顶部背景）
+      符合 top-down 语义
+      排障：BMP 解析曾用 PowerShell 浮点除法算 stride 误读错位（文件 stride=2400
+      本无填充）；BMP 头尺寸 120x16 = HiDPI framebuffer（画布 16x16 逻辑），
+      测试按头解析
 
 ## 排障记录
 （按步追加）

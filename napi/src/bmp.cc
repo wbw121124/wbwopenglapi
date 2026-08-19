@@ -65,9 +65,10 @@ std::vector<unsigned char> encodeBmp(int fw, int fh) {
     // 整帧 RGBA（GL 底行在前）
     std::vector<unsigned char> px(static_cast<size_t>(fw) * fh * 4);
     glReadPixels(0, 0, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    // GL 与 BMP 同为自下而上：GL 底行 0 -> BMP 底行 fh-1，图像正向
+    // GL 与 BMP 同为自下而上（BMP 高度为正时文件首行数据 = 图像底部行）:
+    // px 行 0 = 图像底部 = BMP 文件行 0，逐行直拷，不得翻转
     for (int y = 0; y < fh; ++y) {
-        const unsigned char* src = &px[static_cast<size_t>(fh - 1 - y) * fw * 4];
+        const unsigned char* src = &px[static_cast<size_t>(y) * fw * 4];
         unsigned char* dst = &out[54 + static_cast<size_t>(y) * stride];
         for (int x = 0; x < fw; ++x) {
             dst[x * 3 + 0] = src[x * 4 + 2]; // B

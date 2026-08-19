@@ -30,7 +30,9 @@ static void readPx(int x, int y, unsigned char px[4]) {
     glfwGetFramebufferSize(glfwGetCurrentContext(), nullptr, &fh);
     glReadPixels(x, fh - 1 - y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
 }
-// 把当前默认 framebuffer 存为 24-bit BMP（GL 与 BMP 同为自下而上行序）
+// 把当前默认 framebuffer 存为 24-bit BMP。
+// 行序: glReadPixels 行 0 = 图像底部（GL 原点左下）；BMP（高度为正）文件首行
+// 数据亦为图像底部 → 逐行直拷即为正向，此前 (fh-1-y) 翻转导致导出上下颠倒
 static void saveBmp(const char* path) {
     int fw = 0, fh = 0;
     glfwGetFramebufferSize(glfwGetCurrentContext(), &fw, &fh);
@@ -62,7 +64,7 @@ static void saveBmp(const char* path) {
     std::memcpy(&out[30], &comp, 4);
     std::memcpy(&out[34], &isize, 4);
     for (int y = 0; y < fh; ++y) {
-        const unsigned char* src = &px[static_cast<size_t>(fh - 1 - y) * fw * 4];
+        const unsigned char* src = &px[static_cast<size_t>(y) * fw * 4];
         unsigned char* dst = &out[54 + static_cast<size_t>(y) * stride];
         for (int x = 0; x < fw; ++x) {
             dst[x * 3 + 0] = src[x * 4 + 2]; // B

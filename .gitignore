@@ -3,7 +3,7 @@ third_party/
 
 # 构建产物
 build/
-test/
+/test/
 
 # 临时与杂项
 *.exe
