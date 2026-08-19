@@ -58,7 +58,9 @@ jobs:
 
       - name: Install dependencies (vcpkg.json manifest, clang-cl)
         shell: pwsh
-        run: .\vcpkg\vcpkg.exe install --triplet x64-windows --chainload-toolchain toolchain.cmake
+        env:
+          VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
+        run: .\vcpkg\vcpkg.exe install --triplet x64-windows
 
       - name: Fetch GLAD (CMakeLists:28 的 glad target 需要 third_party/glad/src/gl.c)
         shell: pwsh

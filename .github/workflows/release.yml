@@ -263,12 +263,16 @@ jobs:
           fi
           cat toolchain.cmake
 
-      - name: vcpkg install skia (clang, manifest)
+      - name: vcpkg install skia (clang-cl, manifest)
         shell: pwsh
-        run: .\vcpkg\vcpkg.exe install --triplet ${{ matrix.triplet }} --chainload-toolchain toolchain.cmake
+        env:
+          VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
+        run: .\vcpkg\vcpkg.exe install --triplet ${{ matrix.triplet }}
         if: matrix.os == 'windows'
       - name: vcpkg install skia (clang, manifest)
-        run: ./vcpkg/vcpkg install --triplet ${{ matrix.triplet }} --chainload-toolchain=./toolchain.cmake
+        env:
+          VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
+        run: ./vcpkg/vcpkg install --triplet ${{ matrix.triplet }}
         if: matrix.os != 'windows'
 
       - name: Package skia
