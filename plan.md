@@ -50,3 +50,62 @@
 - [x] 阶段2/4：完整 C++ API 映射（renderer.h / renderer_wrap / bmp / addon 注册），冒烟验证通过：矩形/路径/文本/图像/变换/BMP
 - [x] 阶段3/4：JS 包装层（lib/index.js 方法绑定）+ smoke + node:test 自动化测试（npm test 10 项全绿）
 - [x] 阶段4/4：C++ 原生全量回归（build.ps1 全量编译 + 09-12 -t 全绿；01/08 为交互 demo 无 -t 模式）+ README Node.js 章节 + 最终提交
+
+# DirectWrite + Skia 支持（Windows 文本后端增强 + 可选 2D 图形后端）
+
+## 目标
+- DirectWrite：Windows 第三个矢量文本后端（与 GDI/FreeType 并列，**集成不替换**）。
+  宏 `WBWOPENGAL_API_FONT_DWRITE`；build.ps1 `-Backend dwrite`；根 CMake option `WBWOPENGAL_API_FONT_DWRITE`
+- Skia：可选 2D 图形后端（软件栅格化 Surface → RGBA → 现有管线 drawImage 合成，集成不替换）。
+  vcpkg 引入（`skia` 端口），CMake option `WBWOPENGAL_API_SKIA` 默认 OFF；封装层 `include/wbwopenglapi_skia.hpp`
+- 兼容性：Windows 8.1+（DWrite 1.x + `IDWriteGeometrySink`，无 d3d 依赖）；不破坏已勾选功能与
+  GDI/FreeType/HarfBuzz 路径
+
+## 现状分析（2026-08-19）
+- plan.md 现有两章（线宽修复、Node-API 四阶段）均已完成；无"惰性/暂缓"标记条目
+- 渲染管线：include/wbwopenglapi.hpp（2397 行 header-only）——`detail::FontFace`（行 469，
+  GDI/FreeType 双后端 `#ifdef WBWOPENGAL_API_FONT_FREETYPE` 切换），字形空间 1/64 像素、y 向上、
+  基线 y=0（行 420）；`Canvas`（行 1198）fillText/strokeText/measureText；GL 3.3 core 管线
+- 构建系统：build.ps1（MinGW g++ 8.1、-Backend gdi|freetype、-HarfBuzz）、根 CMakeLists.txt
+  （CMake 3.16、option FREETYPE/HARFBUZZ、examples glob）、napi/（cmake-js 7.4 + cmake-runtime）、
+  .github/workflows/release.yml（7 平台矩阵）；语言仅 C++17
+- **最小链路验证（本步）**：MinGW-w64 8.1 自带 dwrite.h/dwrite_2.h/d2d1_1.h 与 libdwrite.a；
+  dt_smoke（工厂/系统字体/GetGlyphIndices/GetGlyphRunOutline/自定义 sink）编译链接运行 exit=0
+- 缺失信息与默认假设：
+  - Skia 用途 → 软件栅格化（RasterSurface）Surface → RGBA → `wbwopenglapi::Image` →
+    `ctx.drawImage` 合成（零 GPU 上下文丢失风险，headless/CI 可跑）
+  - DWrite 度量语义 → 与 FreeType 对齐：ascender 正/descender 负、1/64 像素
+  - DPI → 字形空间为逻辑像素（与 DPI 无关）；HiDPI 由 Canvas framebuffer 层适配（既有机制）
+
+## 技术方案
+- **DirectWrite**：头文件方式（系统头）+ 链接 `-ldwrite`（MinGW 自带 import lib）。
+  接入点 `detail::FontFace` 加第三个后端分支（`#elif defined(WBWOPENGAL_API_FONT_DWRITE)`）：
+  - 字体：file 空 → 系统字体集合 Segoe UI/Arial/Microsoft YaHei UI；非空 → CreateFontFileReference + CreateFontFace
+  - 字形：GetGlyphIndices → GetGlyphRunOutline（emSize=sizePx → 像素单位，收集时 ×64 对齐 1/64
+    字形空间；y 轴 DWrite 向下 → 取反为向上）
+  - advance：GetDesignGlyphAdvances × sizePx/upem×64；升/降：DWRITE_FONT_METRICS × sizePx/upem×64
+  - shape()/fontFeatures 不支持（同 GDI 语义）；缺字形返回空轮廓（同 GDI）
+  - 仅含 d2d1_1.h 的 IDWriteGeometrySink 接口定义（Win8.1 起 IDWriteGeometrySink =
+    ID2D1SimplifiedGeometrySink 别名），sink 由本库实现，**不链接 d2d1/d3d11**
+- **Skia 引入：vcpkg**（唯一可维护路径）——
+  - 预编译库：Google 无官方 Windows 预编译发布（第三方 ABI 风险）✗
+  - 源码子模块：需 depot_tools/GN/ninja 新构建工具 + 1GB+ 下载（违约束、网络受限）✗
+  - vcpkg：与 CMake 原生一体（find_package(skia CONFIG)），MSVC/Clang 官方支持 ✓
+    **代价**：MinGW 8.1 无法构建 skia（需 MSVC）→ 实际编译验证放 GitHub Actions
+    （windows-msvc + vcpkg 并行安装），本机仅配置层/无 Skia 时的编译隔离/文档验证
+- **Skia 后端：RasterSurface（软件）**——对接现有 GL 管线零风险（无 GrDirectContext/GL 上下文
+  丢失问题）、headless 可跑；D3D11 GPU 后端需全新纹理/交换链管线，与"集成不替换"不符
+- **工具链约束**：不引入现有构建方式之外的新工具；vcpkg 仅为 Skia 可选构建的依赖获取器，
+  默认构建链（build.ps1 / cmake 无 vcpkg）不变
+
+## 步骤（每步：更新本文 → git add（仅该步文件）→ commit → push）
+- [x] 步 0/4：现状分析 + 技术方案 + 最小链路验证（dt_smoke：MinGW dwrite 头/链接/几何 sink exit=0）
+- [ ] 步 1/4：构建配置：build.ps1 `-Backend dwrite`（`-ldwrite`）；根 CMakeLists
+      `WBWOPENGAL_API_FONT_DWRITE` option（Windows-only）→ 验证 05_text 用 DWrite 后端编译运行
+- [ ] 步 2/4：DirectWrite 封装层：FontFace 第三后端分支（工厂/字体/度量/字形轮廓收集器/advance）
+- [ ] 步 3/4：整合 + 示例 13_dwrite_text（仿 05_text，含 -t 回归）+ README 构建章节 + 全量回归
+- [ ] 步 4/4：Skia：vcpkg.json manifest + `WBWOPENGAL_API_SKIA` option + include/wbwopenglapi_skia.hpp
+      （RasterSurface 封装）+ 示例 14_skia（条件编译，无窗口输出 BMP）+ 文档 + CI 验证 job
+
+## 排障记录
+（按步追加）
