@@ -1,0 +1,257 @@
+# release-skia.yml - 发布 Skia 库包（独立 workflow，失败不阻塞核心/napi 发布）
+#   触发：推送 v* 标签（如 v0.2.0）或手动 workflow_dispatch。
+#   产出：wbwopenglapi-skia-<os>-<arch>.tar.gz，发布到 Releases：
+#     wbwopenglapi.hpp / wbwopenglapi_skia.hpp + skia/{include,lib,bin}
+#   Windows amd64：用 Build-Skia 的 GN+LLVM 方案（aseprite/skia aseprite-m102 分支,
+#   depot_tools + clang/LLVM + GN + ninja，全程 LLVM 无 MSVC 编译器）。
+#   其余 7 组合：vcpkg skia 端口 + clang/clang-cl 工具链
+#   （vcpkg skia 不支持 mingw；Windows 为 clang-cl + MSVC 运行库）。
+#   实验性组合（linux-x86 / windows-x86 / windows-amd64-GN）continue-on-error。
+name: Release Skia
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  skia:
+    name: skia-${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.exp }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64,   runner: ubuntu-latest,         os: linux,   arch: amd64, triplet: x64-linux,   exp: false, windows: false, gn: false }
+          - { name: linux-arm64,   runner: ubuntu-24.04-arm,      os: linux,   arch: arm64, triplet: arm64-linux,  exp: false, windows: false, gn: false }
+          - { name: linux-x86,     runner: ubuntu-latest,         os: linux,   arch: x86,   triplet: x86-linux,    exp: true,  windows: false, gn: false }
+          - { name: windows-amd64, runner: windows-latest,        os: windows, arch: amd64, triplet: x64-windows,   exp: true,  windows: true,  gn: true }
+          - { name: windows-x86,   runner: windows-latest,        os: windows, arch: x86,   triplet: x86-windows,   exp: true,  windows: true,  gn: false }
+          - { name: windows-arm64, runner: windows-11-vs2026-arm, os: windows, arch: arm64, triplet: arm64-windows, exp: false, windows: true,  gn: false }
+          - { name: macos-amd64,   runner: macos-13,              os: macos,   arch: amd64, triplet: x64-osx,      exp: false, windows: false, gn: false }
+          - { name: macos-arm64,   runner: macos-14,              os: macos,   arch: arm64, triplet: arm64-osx,     exp: false, windows: false, gn: false }
+    env:
+      OST: ${{ matrix.os }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ---------------- GN+LLVM 方案（windows-amd64，Build-Skia 已验证链路） ----------------
+      - name: Checkout Skia source (aseprite-m102)
+        if: matrix.gn == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: aseprite/skia
+          ref: aseprite-m102
+          path: skia
+
+      - name: Setup depot_tools
+        if: matrix.gn == 'true'
+        shell: pwsh
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$env:GITHUB_WORKSPACE\depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & .\depot_tools\gclient.bat
+
+      - name: Install LLVM and Ninja
+        if: matrix.gn == 'true'
+        shell: pwsh
+        run: |
+          choco install llvm ninja -y --limit-output
+          echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Setup Visual Studio environment (clang 运行时库/头)
+        if: matrix.gn == 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Fix Clang directory structure for Skia
+        if: matrix.gn == 'true'
+        shell: pwsh
+        run: |
+          $clangDir = "C:\Program Files\LLVM"
+          New-Item -ItemType Directory -Force -Path "$clangDir\lib\clang"
+          $clangVersion = & "$clangDir\bin\clang.exe" --version | Select-String -Pattern "version (\d+\.\d+\.\d+)" | ForEach-Object { $_.Matches.Groups[1].Value }
+          if ($clangVersion) {
+            New-Item -ItemType Directory -Force -Path "$clangDir\lib\clang\$clangVersion"
+            Write-Host "Created Clang version directory: $clangDir\lib\clang\$clangVersion"
+          } else {
+            New-Item -ItemType Directory -Force -Path "$clangDir\lib\clang\18.0.0"
+          }
+
+      - name: Cache Skia dependencies
+        if: matrix.gn == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/skia/third_party/externals
+            ${{ github.workspace }}/skia/out
+          key: skia-gn-aseprite-m102-${{ hashFiles('skia/DEPS') }}
+
+      - name: Sync dependencies (git-sync-deps)
+        if: matrix.gn == 'true'
+        working-directory: skia
+        shell: cmd
+        run: python tools/git-sync-deps
+
+      - name: Generate build files with GN (LLVM x64)
+        if: matrix.gn == 'true'
+        working-directory: skia
+        shell: cmd
+        run: |
+          gn gen out/Release-x64 --args="is_debug=false is_official_build=true skia_use_system_expat=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=false skia_use_freetype=true skia_use_harfbuzz=true skia_pdf_subset_harfbuzz=true skia_use_system_freetype2=false skia_use_system_harfbuzz=false target_cpu=\"x64\" clang_win=\"C:\Program Files\LLVM\" win_vc=\"C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\" extra_cflags=[\"-MT\", \"-Wno-attributes\"]"
+
+      - name: Build with Ninja
+        if: matrix.gn == 'true'
+        working-directory: skia
+        shell: cmd
+        run: |
+          ninja -C out/Release-x64 skia modules
+
+      # ---------------- vcpkg+clang 方案（其余 7 组合） ----------------
+      - name: Linux deps (clang / x86 multilib)
+        if: matrix.os == 'linux' && matrix.gn != 'true'
+        run: |
+          set -e
+          sudo apt-get update
+          if [ "${{ matrix.arch }}" = "x86" ]; then
+            sudo dpkg --add-architecture i386
+            sudo apt-get update
+            sudo apt-get install -y clang gcc-multilib g++-multilib libc6-dev-i386
+          else
+            sudo apt-get install -y clang
+          fi
+
+      - name: Add LLVM to PATH (Windows)
+        if: matrix.windows == 'true' && matrix.gn != 'true'
+        shell: pwsh
+        run: echo "C:\Program Files\LLVM\bin" | Out-File -Append $env:GITHUB_PATH
+
+      - name: Checkout vcpkg
+        if: matrix.gn != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: vcpkg
+
+      - uses: actions/cache@v4
+        if: matrix.gn != 'true'
+        with:
+          path: ${{ github.workspace }}/vcpkg_installed
+          key: skia-${{ matrix.triplet }}-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          save-always: true
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+        if: matrix.gn != 'true' && matrix.os == 'windows'
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+        if: matrix.gn != 'true' && matrix.os != 'windows'
+
+      - name: Prepare clang toolchain file
+        if: matrix.gn != 'true'
+        shell: bash
+        run: |
+          if [ "${{ matrix.windows }}" = "true" ]; then
+            cat > toolchain.cmake <<'EOF'
+          set(CMAKE_C_COMPILER "clang-cl")
+          set(CMAKE_CXX_COMPILER "clang-cl")
+          set(CMAKE_MT "mt")
+          EOF
+          elif [ "${{ matrix.arch }}" = "x86" ]; then
+            cat > toolchain.cmake <<'EOF'
+          set(CMAKE_C_COMPILER "clang")
+          set(CMAKE_CXX_COMPILER "clang++")
+          set(CMAKE_C_FLAGS "-m32")
+          set(CMAKE_CXX_FLAGS "-m32")
+          EOF
+          else
+            cat > toolchain.cmake <<'EOF'
+          set(CMAKE_C_COMPILER "clang")
+          set(CMAKE_CXX_COMPILER "clang++")
+          EOF
+          fi
+          cat toolchain.cmake
+
+      - name: vcpkg install skia (clang-cl, manifest)
+        shell: pwsh
+        env:
+          VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
+        run: .\vcpkg\vcpkg.exe install --triplet ${{ matrix.triplet }}
+        if: matrix.gn != 'true' && matrix.os == 'windows'
+      - name: vcpkg install skia (clang, manifest)
+        env:
+          VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
+        run: ./vcpkg/vcpkg install --triplet ${{ matrix.triplet }}
+        if: matrix.gn != 'true' && matrix.os != 'windows'
+
+      # ---------------- 打包（统一布局：include/lib/bin） ----------------
+      - name: Package skia
+        shell: bash
+        run: |
+          mkdir -p dist/skia/skia/include dist/skia/skia/lib dist/skia/skia/bin
+          cp -f include/wbwopenglapi.hpp include/wbwopenglapi_skia.hpp dist/skia/
+          if [ "${{ matrix.gn }}" = "true" ]; then
+            cp -r skia/include dist/skia/skia/include
+            cp skia/out/Release-x64/*.lib dist/skia/skia/lib/
+            cp skia/out/Release-x64/icudtl.dat dist/skia/skia/bin/
+          else
+            cp -r vcpkg_installed/${{ matrix.triplet }}/include dist/skia/skia/include
+            cp -r vcpkg_installed/${{ matrix.triplet }}/lib dist/skia/skia/lib
+            if [ -d vcpkg_installed/${{ matrix.triplet }}/bin ]; then
+              cp -r vcpkg_installed/${{ matrix.triplet }}/bin dist/skia/skia/bin
+            fi
+          fi
+          cat > dist/skia/README-SKIA.md <<'EOF'
+          # wbwopenglapi-skia (LLVM 构建)
+          # 内容: wbwopenglapi.hpp / wbwopenglapi_skia.hpp（可选软件栅格化后端封装）
+          #      + skia/{include,lib,bin}
+          #   windows-amd64: GN+LLVM 自建（aseprite/skia m102, clang 编译, 静态 -MT）
+          #   其余平台: vcpkg skia 端口全量产物（clang/clang-cl 编译）
+          # 用法（CMake 示例）:
+          #   add_executable(app app.cpp)
+          #   target_include_directories(app PRIVATE skia/include)
+          #   target_compile_definitions(app PRIVATE WBWOPENGAL_API_SKIA)
+          #   # windows: target_link_libraries(app PRIVATE skia/lib/skia.lib ...)
+          #   #          icudtl.dat 需拷到运行目录（或设 SKIA_ICU_DATA_FILE）
+          #   # 动态库产物需将 skia/bin/*.dll 置于运行目录
+          # 坐标/API 见 wbwopenglapi_skia.hpp 头部说明与 README.md "Skia（可选）" 章节。
+          EOF
+          tar -C dist/skia -czf wbwopenglapi-skia-$OST-$ARCH.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wbw-skia-${{ matrix.os }}-${{ matrix.arch }}
+          path: wbwopenglapi-skia-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Release (skia)
+    needs: skia
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wbw-skia-*
+          path: pkgs
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: pkgs/*.tar.gz
+          generate_release_notes: true

@@ -1,18 +1,13 @@
-# release.yml - 发布工作流
+# release.yml - 发布工作流（核心包 + napi 包）
 #   触发：推送 v* 标签（如 v0.2.0）或手动 workflow_dispatch。
-#   产出（每个平台 3 个包，合并发布到 Releases）：
+#   Skia 库包在独立 workflow release-skia.yml（互不阻塞）。
+#   产出（每个平台 2 个包，合并发布到 Releases）：
 #     wbwopenglapi-<os>-<arch>.tar.gz         核心包：include/（header-only 库）
 #                                               + CMakeLists/README + Windows x64/x86 DLL/导入库
 #     wbwopenglapi-napi-<os>-<arch>.tar.gz   Node 插件：build/*.node（+ 平台 DLL）
 #                                               + lib/index.js + package.json
-#     wbwopenglapi-skia-<os>-<arch>.tar.gz   Skia 库包：LLVM(clang/clang-cl) 构建的
-#                                               skia 库+头 + wbwopenglapi.hpp/_skia.hpp（自包含）
 #   矩阵：linux/windows/macos × amd64/arm64/x86；macos 无 x86（macOS 自 2018 无 32 位
 #   工具链）。windows-arm64 用 windows-11-vs2026-arm（公开仓库免费，ARM64 原生）。
-#   Skia 说明：vcpkg skia 端口不支持 mingw（skia: !(windows&arm32) & !mingw），
-#   Windows 用 LLVM clang-cl + MSVC 运行库，Linux/macOS 用系统 clang；故 Windows
-#   各架构的 skia 包实际为 clang-cl 构建。x86 平台的 skia 包标为实验性
-#   （continue-on-error），amd64/arm64 为正式产物。
 #   napi：仅 amd64/x86 提供（ARM64 交叉 Node 插件需对应架构工具链，暂不打包）。
 name: Release
 
@@ -168,145 +163,9 @@ jobs:
           path: wbwopenglapi-napi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
-  # ============================================================
-  # Skia 库包（LLVM 构建，独立 job：失败不影响核心/napi 产物；
-  # x86 平台 continue-on-error 标记实验性）
-  # ============================================================
-  skia:
-    name: skia-${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.exp }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: linux-amd64,   runner: ubuntu-latest,         os: linux,   arch: amd64, triplet: x64-linux,   exp: false, windows: false }
-          - { name: linux-arm64,   runner: ubuntu-24.04-arm,      os: linux,   arch: arm64, triplet: arm64-linux,  exp: false, windows: false }
-          - { name: linux-x86,     runner: ubuntu-latest,         os: linux,   arch: x86,   triplet: x86-linux,    exp: true,  windows: false }
-          - { name: windows-amd64, runner: windows-latest,        os: windows, arch: amd64, triplet: x64-windows,   exp: false, windows: true }
-          - { name: windows-x86,   runner: windows-latest,        os: windows, arch: x86,   triplet: x86-windows,   exp: true,  windows: true }
-          - { name: windows-arm64, runner: windows-11-vs2026-arm, os: windows, arch: arm64, triplet: arm64-windows, exp: false, windows: true }
-          - { name: macos-amd64,   runner: macos-13,              os: macos,   arch: amd64, triplet: x64-osx,      exp: false, windows: false }
-          - { name: macos-arm64,   runner: macos-14,              os: macos,   arch: arm64, triplet: arm64-osx,     exp: false, windows: false }
-    env:
-      OST: ${{ matrix.os }}
-      ARCH: ${{ matrix.arch }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Linux deps (clang / x86 multilib)
-        if: matrix.os == 'linux'
-        run: |
-          set -e
-          sudo apt-get update
-          if [ "${{ matrix.arch }}" = "x86" ]; then
-            sudo dpkg --add-architecture i386
-            sudo apt-get update
-            sudo apt-get install -y clang gcc-multilib g++-multilib libc6-dev-i386
-          else
-            sudo apt-get install -y clang
-          fi
-
-      - name: Add LLVM to PATH (Windows)
-        if: matrix.windows == 'true'
-        shell: pwsh
-        run: echo "C:\Program Files\LLVM\bin" | Out-File -Append $env:GITHUB_PATH
-
-      - name: Checkout vcpkg + cache
-        uses: actions/checkout@v4
-        with:
-          repository: microsoft/vcpkg
-          path: vcpkg
-
-      - uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/vcpkg_installed
-          key: skia-${{ matrix.triplet }}-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          save-always: true
-
-      - name: Bootstrap vcpkg
-        shell: pwsh
-        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-        if: matrix.os == 'windows'
-      - name: Bootstrap vcpkg
-        run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
-        if: matrix.os != 'windows'
-
-      # LLVM 工具链（用户要求 Skia 用 llvm 构建）：
-      #   Windows: clang-cl（LLVM + MSVC 运行库，vcpkg skia 端口不支持 mingw）
-      #   Linux x86: clang + -m32 交叉；其余: 系统 clang
-      - name: Prepare clang toolchain file
-        shell: bash
-        run: |
-          if [ "${{ matrix.windows }}" = "true" ]; then
-            cat > toolchain.cmake <<'EOF'
-          set(CMAKE_C_COMPILER "clang-cl")
-          set(CMAKE_CXX_COMPILER "clang-cl")
-          set(CMAKE_MT "mt")
-          EOF
-          elif [ "${{ matrix.arch }}" = "x86" ]; then
-            cat > toolchain.cmake <<'EOF'
-          set(CMAKE_C_COMPILER "clang")
-          set(CMAKE_CXX_COMPILER "clang++")
-          set(CMAKE_C_FLAGS "-m32")
-          set(CMAKE_CXX_FLAGS "-m32")
-          EOF
-          else
-            cat > toolchain.cmake <<'EOF'
-          set(CMAKE_C_COMPILER "clang")
-          set(CMAKE_CXX_COMPILER "clang++")
-          EOF
-          fi
-          cat toolchain.cmake
-
-      - name: vcpkg install skia (clang-cl, manifest)
-        shell: pwsh
-        env:
-          VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
-        run: .\vcpkg\vcpkg.exe install --triplet ${{ matrix.triplet }}
-        if: matrix.os == 'windows'
-      - name: vcpkg install skia (clang, manifest)
-        env:
-          VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
-        run: ./vcpkg/vcpkg install --triplet ${{ matrix.triplet }}
-        if: matrix.os != 'windows'
-
-      - name: Package skia
-        shell: bash
-        run: |
-          mkdir -p dist/skia/skia
-          cp -f include/wbwopenglapi.hpp include/wbwopenglapi_skia.hpp dist/skia/
-          cp -r vcpkg_installed/${{ matrix.triplet }}/include dist/skia/skia/include
-          cp -r vcpkg_installed/${{ matrix.triplet }}/lib dist/skia/skia/lib
-          if [ -d vcpkg_installed/${{ matrix.triplet }}/bin ]; then
-            cp -r vcpkg_installed/${{ matrix.triplet }}/bin dist/skia/skia/bin
-          fi
-          cat > dist/skia/README-SKIA.md <<'EOF'
-          # wbwopenglapi-skia (LLVM 构建)
-          # 内容: wbwopenglapi.hpp / wbwopenglapi_skia.hpp（可选软件栅格化后端封装）
-          #      + skia/{include,lib,bin}（vcpkg skia 端口全量构建产物，clang/clang-cl）
-          # 用法（Windows 示例，MSVC/clang-cl + CMake）:
-          #   add_executable(app app.cpp)
-          #   target_include_directories(app PRIVATE skia/include)
-          #   target_compile_definitions(app PRIVATE WBWOPENGAL_API_SKIA)
-          #   target_link_libraries(app PRIVATE skia/lib/skia.lib)
-          #   # 动态库需将 skia/bin/*.dll 置于运行目录
-          # 坐标/API 见 wbwopenglapi_skia.hpp 头部说明与 README.md "Skia（可选）" 章节。
-          EOF
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wbw-skia-${{ matrix.os }}-${{ matrix.arch }}
-          path: wbwopenglapi-skia-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
-          if-no-files-found: error
-
   release:
-    name: Release
-    needs: [build, skia]
+    name: Release (core + napi)
+    needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
