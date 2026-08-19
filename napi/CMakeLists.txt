@@ -1,0 +1,67 @@
+# napi/CMakeLists.txt - wbwopenglapi 的 Node-API 插件构建（供 cmake-js 使用）
+#   约定：target 名 = project 名 = wbwopenglapi（cmake-js 按 project 名查找 addon）
+#   后端：Windows 默认 GDI（零第三方 DLL 依赖）；GLFW 隐藏窗口无头渲染
+#   cmake-js 注入变量：CMAKE_JS_INC（Node 头）、CMAKE_JS_LIB（node.lib）、
+#   CMAKE_JS_SRC（win_delay_load_hook.cc）、CMAKE_JS_NODELIB_*（MSVC 专用）
+cmake_minimum_required(VERSION 3.16)
+project(wbwopenglapi LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# N-API 版本 8：Node.js LTS（>= 16.11）ABI 稳定
+# NAPI_HAS_THREADS=0：本机 MinGW-W64 8.1 无 winpthreads，std::mutex 不可用；
+# 本插件为单线程同步渲染，不依赖 ThreadSafeFunction/AsyncWorker，
+# 关闭后 node-addon-api 走无线程路径（与官方 wasm 构建相同的官方开关）
+add_compile_definitions(NAPI_VERSION=8 NAPI_HAS_THREADS=0)
+
+# cmake-js 在 Windows 上无条件注入 MSVC 专用 /DELAYLOAD:NODE.EXE，GNU ld 不识别，非 MSVC 时剥离
+if(WIN32 AND NOT MSVC)
+    string(REPLACE "/DELAYLOAD:NODE.EXE" "" CMAKE_SHARED_LINKER_FLAGS
+        "${CMAKE_SHARED_LINKER_FLAGS}")
+endif()
+
+set(WBWOPENGAL_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+add_library(wbwopenglapi SHARED
+    src/addon.cc
+    ${CMAKE_JS_SRC}
+    ${WBWOPENGAL_ROOT}/third_party/glad/src/gl.c)
+
+set_target_properties(wbwopenglapi PROPERTIES PREFIX "" SUFFIX ".node")
+
+target_include_directories(wbwopenglapi PRIVATE
+    ${CMAKE_JS_INC}
+    ${WBWOPENGAL_ROOT}/include
+    ${WBWOPENGAL_ROOT}/third_party/glad/include
+    ${WBWOPENGAL_ROOT}/third_party/glfw/include)
+
+# MinGW 直接链接 MSVC 编译的 glfw3 导入库（仓库既有做法，见根 CMakeLists.txt）
+target_link_libraries(wbwopenglapi PRIVATE
+    ${CMAKE_JS_LIB}
+    ${WBWOPENGAL_ROOT}/third_party/glfw/libglfw3dll.a
+    opengl32
+    gdi32)
+
+# MinGW 下从 node_api.def 生成 node.exe 导入库（MSVC 用 lib.exe；MinGW 用 dlltool）
+if(WIN32 AND CMAKE_JS_NODELIB_DEF AND CMAKE_JS_NODELIB_TARGET)
+    if(MSVC)
+        execute_process(COMMAND ${CMAKE_AR} /def:${CMAKE_JS_NODELIB_DEF}
+            /out:${CMAKE_JS_NODELIB_TARGET} ${CMAKE_STATIC_LINKER_FLAGS})
+    else()
+        execute_process(COMMAND dlltool -d ${CMAKE_JS_NODELIB_DEF}
+            -D node.exe -l ${CMAKE_JS_NODELIB_TARGET}
+            COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+endif()
+
+# 运行时 DLL 与 .node 同目录（LoadLibrary 的 DLL 搜索含模块所在目录）
+if(WIN32)
+    add_custom_command(TARGET wbwopenglapi POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${WBWOPENGAL_ROOT}/third_party/glfw/glfw3.dll
+            $<TARGET_FILE_DIR:wbwopenglapi>)
+endif()

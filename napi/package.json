@@ -1,0 +1,35 @@
+{
+  "name": "wbwopenglapi",
+  "version": "0.1.0",
+  "description": "Node-API bindings for wbwopenglapi (header-only C++17 OpenGL 2D Canvas renderer, hidden-window headless)",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "node scripts/build.cjs compile",
+    "rebuild": "node scripts/build.cjs rebuild",
+    "smoke": "node test/smoke.mjs",
+    "test": "node --test test/"
+  },
+  "binary": {
+    "napi_versions": [
+      8
+    ]
+  },
+  "keywords": [
+    "canvas",
+    "opengl",
+    "napi",
+    "native",
+    "c++"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.11.0"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.9.2"
+  },
+  "devDependencies": {
+    "cmake-js": "^7.4.0",
+    "cmake-runtime": "^4.3.1"
+  }
+}
