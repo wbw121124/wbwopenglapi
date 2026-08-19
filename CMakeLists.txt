@@ -98,7 +98,7 @@ endif()
 # 两种引入方式（二选一）：
 #   A. vcpkg skia 端口:  cmake -DWBWOPENGAL_API_SKIA=ON
 #      -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-#   B. GN+LLVM 自建产物直连（aseprite/skia m102 等: include/ + *.lib）:
+#   B. GN+LLVM 自建产物直连（google/skia chrome/m* 等: include/ + *.lib）:
 #      cmake -DWBWOPENGAL_API_SKIA=ON -DWBWOPENGAL_API_SKIA_DIR=<gn out 目录>
 # 启用后额外构建示例 14_skia（无窗口, 仅链接 skia, 见下文；icudtl.dat 需自拷运行）
 option(WBWOPENGAL_API_SKIA "使用 Skia 软件栅格化后端（vcpkg skia 端口或 GN 产物直连）" OFF)

@@ -92,7 +92,7 @@ build\Release\14_skia.exe   # headless 像素校验 + 导出 test/14_skia.bmp
 ```
 
 ```
-# B. GN+LLVM 自建产物直连（aseprite/skia m102 + depot_tools + clang + GN/ninja，
+# B. GN+LLVM 自建产物直连（google/skia chrome/m* + depot_tools + clang + GN/ninja，
 #    全部 LLVM 编译；产物含 include/ 与 *.lib，见仓库 Build-Skia）
 cmake -B build -A x64 -T ClangCL -DWBWOPENGAL_API_SKIA=ON `
   -DWBWOPENGAL_API_SKIA_DIR=<skia out 目录>
@@ -151,7 +151,7 @@ c.close();
 - `wbwopenglapi-napi-<os>-<arch>.tar.gz`：Node 插件（build/*.node + lib/index.js +
   package.json，解压后 `npm install <tarball>` 可用）
 - `wbwopenglapi-skia-<os>-<arch>.tar.gz`：Skia 库包（LLVM 构建：windows-amd64 为
-  GN+LLVM 自建 aseprite/skia m102 [实验性]，其余平台为 vcpkg 端口 + clang/clang-cl；
+  GN+LLVM 自建 google/skia chrome/m152 [实验性]，其余平台为 vcpkg 端口 + clang/clang-cl；
   内含 wbwopenglapi.hpp / wbwopenglapi_skia.hpp + skia 全量 include/lib/bin，
   配合 Skia 章节方案 B/C 使用，无需 vcpkg）
 

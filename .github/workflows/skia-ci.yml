@@ -1,7 +1,7 @@
 # skia-ci.yml - Skia 可选后端集成验证（软件栅格化, 无窗口）
 #   触发：推送 main 或手动 workflow_dispatch。
 #   目的：wbwopenglapi_skia.hpp + 示例 14_skia 的真实编译/运行验证。
-#   构建方式：GN+LLVM 自建（aseprite/skia aseprite-m102 分支 + depot_tools +
+#   构建方式：GN+LLVM 自建（google/skia chrome/m* 分支 + depot_tools +
 #   LLVM clang + GN + ninja），全程 LLVM 无 MSVC 编译器；产物经
 #   WBWOPENGAL_API_SKIA_DIR 直连 CMake（见根 CMakeLists.txt）。
 #   与 release-skia.yml 的 windows-amd64 组合同链路（发布链路的先行验证）。
@@ -12,6 +12,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+
+env:
+  SKIA_REPO: google/skia
+  SKIA_BRANCH: chrome/m152
 
 jobs:
   skia-smoke:
@@ -24,11 +28,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Checkout Skia source (aseprite-m102)
+      - name: Checkout Skia source (chrome stable 对应分支)
         uses: actions/checkout@v4
         with:
-          repository: aseprite/skia
-          ref: aseprite-m102
+          repository: ${{ env.SKIA_REPO }}
+          ref: ${{ env.SKIA_BRANCH }}
           path: skia
 
       - name: Setup depot_tools
@@ -69,7 +73,7 @@ jobs:
           path: |
             ${{ github.workspace }}/skia/third_party/externals
             ${{ github.workspace }}/skia/out
-          key: skia-gn-aseprite-m102-${{ hashFiles('skia/DEPS') }}
+          key: skia-gn-${{ env.SKIA_BRANCH }}-${{ hashFiles('skia/DEPS') }}
           save-always: true
 
       - name: Sync dependencies (git-sync-deps)
