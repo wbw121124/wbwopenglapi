@@ -151,6 +151,78 @@
 ## 排障记录
 （按步追加）
 
+# Skia CI 链路排障（GN+LLVM + chrome/m152）——进行中
+
+## 目标
+跑通 windows-amd64 的 Skia CI（GN+LLVM 构建 chrome/m152 + ClangCL 编译 14_skia +
+运行像素校验），成功打发布格式包，debug.yml 端到端验证包自包含性。
+wbwopenglapi_skia.hpp 原按 aseprite-m102 API 编写，chrome/m152 有大量 API 移除，
+需逐一适配。
+
+## 已完成（各步均 commit+push 并触发 CI 验证）
+- [x] GLAD 缺失：CMakeLists:28 无条件 add_library(glad)，仓库不含 third_party →
+      skia-ci/debug.yml 在 configure 前跑 fetch_deps.ps1 -SkipGLFW -SkipFreeType
+      -SkipFiraCode（commit 48b1e8f；f9f6b3b 修 YAML 锚点 `&` 引号）
+- [x] include 根：CMake 要求 SKIA_DIR/include，GN out 目录无 include → configure 前
+      把 skia/include 拷贝进 out/Release-x64/include（e4cee7d）
+- [x] 引号形式头文件：#include "include/core/SkCanvas.h" 根应为 SKIA_DIR 本身 →
+      CMakeLists 同时加 SKIA_DIR 与 SKIA_DIR/include 两个 include 根（3bd1224）
+- [x] m102→m152 API 第一批适配（c084ba0）：
+      MakeRasterN32Premul→SkSurfaces::Raster；SkPath 修改器→SkPathBuilder（fill/stroke
+      缓存 detach 路径，保"先 fill 后 stroke 复用"语义）；drawString(std::string)→.c_str()
+
+## 当前卡点（下一步）
+### 本次修改（修改前记录，commit 前）——适配 m152 移除 SkFontMgr::RefDefault
+**根因（已核实，证据见下）**：
+- chrome/m152 include/core/SkFontMgr.h 全文无 RefDefault()（仅 RefEmpty 与实例方法），
+  RELEASE_NOTES 原文 "SkFontMgr::RefDefault() has been deleted. Clients should instantiate
+  and manage their own SkFontMgr s"；wbwopenglapi_skia.hpp:49 仍在调用 → HEAD 编译必失败
+- 日志 2785 行 SkCanvas.h not found 为旧提交 e4cee7d 问题，HEAD 3bd1224 双 include 根
+  已修复，不属本次修改对象
+
+**方案（选用 B：DirectWrite 平台工厂，证据链完整）**：
+- m152 SkTypeface.h 无静态 MakeFromFile（RELEASE_NOTES deprecated+移除）→ 方案 A 证伪
+- include/ports/SkTypeface_win.h 声明 `SkFontMgr_New_DirectWrite(IDWriteFactory*=nullptr, ...)`
+- GN 日志确认编译 src/ports/SkFontMgr_win_dw.cpp → 符号在 skia.lib
+- skia.gni `skia_enable_fontmgr_win = is_win`（默认开）；vcpkg Windows 桌面默认同开
+- SkDWrite.cpp 用 LoadLibraryExW+GetProcAddress 动态加载 dwrite.dll → 链接期零额外库
+- 兜底链：New_DirectWrite → matchFamilyStyle("Segoe UI") → matchFamilyStyle(nullptr)
+  → makeFromFile("C:\Windows\Fonts\segoeui.ttf", 0) → MakeEmpty()
+- 非 Windows 分支：RefEmpty() 保编译（无字形，文本受限，后续可接 Custom_Directory）
+- 方案 C（RefEmpty 渲染）排除：SkEmptyFontMgr 0 families 无字形，14_skia 文本校验必 FAIL
+
+**预期验证**：ClangCL 编译 14_skia 通过 → 链接通过（win_dw 无额外系统库）→ 运行
+（icudtl.dat 已拷）→ 文本像素校验通过（DirectWrite 有字形）→ exit=0 → 打包 tar.gz
+
+### 本次修改（修改后记录）——已实施（commit 待 CI 验证）
+- include/wbwopenglapi_skia.hpp 两处改动（均隔离在 WBWOPENGAL_API_SKIA 分支内）：
+  1. include 段新增 `#if defined(SK_BUILD_FOR_WIN) #include "include/ports/SkTypeface_win.h" #endif`
+     （头文件内部同宏守卫，非 Windows 为空；SK_BUILD_FOR_WIN 由 SkFeatures.h 在 _WIN32 下定义）
+  2. 构造函数字体初始化：`SkFontMgr::RefDefault()` → 条件编译：
+     Windows = `SkFontMgr_New_DirectWrite()`；非 Windows = `SkFontMgr::RefEmpty()` 保编译；
+     兜底链 matchFamilyStyle("Segoe UI") → matchFamilyStyle(nullptr) →
+     makeFromFile("C:\Windows\Fonts\segoeui.ttf", 0) → SkTypeface::MakeEmpty()
+- 未动 CMakeLists.txt / skia-ci.yml（include 根已由 3bd1224 解决；include/ports/ 在
+  Bundle include 复制范围内）
+- 静态检查：无 m152 已删除 API；全部调用签名已对照 m152 头文件核实
+  （SkFontMgr_New_DirectWrite 无参调用匹配默认参数重载；makeFromFile 为实例方法；
+  SkFontStyle::Normal 为 static constexpr）
+- 本地验证边界：本机 MinGW 8.1 无 skia 产物无法编译 14_skia；改动仅在
+  WBWOPENGAL_API_SKIA 分支内，build.ps1 常规示例（09-12 等）零影响
+- 待 CI 确认：编译/链接/运行/打包全链路（push 触发 skia-ci push main）
+
+## 排障记录
+- YAML：`run: & .\scripts\...` 开头 & 是锚点语法必须加引号；name 值内中文冒号
+  须整体加引号（列间以空格分隔的 "include+libs" 写法规避）
+- PowerShell here-string 开始/闭合标记必须行首（历史 4 处缩进 + 缺 @' 开始标记已修）
+- m152 已删除 API 核实（raw.githubusercontent.com/google/skia/chrome%2Fm152 实抓）：
+  - SkFontMgr::RefDefault() 删除；SkTypeface 静态 MakeFromFile/MakeFromName 删除
+  - 仍在：SkFontMgr::RefEmpty/matchFamilyStyle/makeFromFile(实例)、
+    SkTypeface::MakeEmpty、SkSurfaces::Raster、SkPathBuilder、SkCanvas::drawString
+  - SkTypeface_win.h 声明 SkFontMgr_New_DirectWrite / SkFontMgr_New_GDI；
+    GN 产物仅编译 win_dw（GDI 工厂未编译，故排除）
+  - SkDWrite.cpp 动态加载 dwrite.dll → 无需链接 dwrite.lib
+
 # 发布任务后续：config.yml 版本中心 + Skia CI 打包 e2e（debug.yml）
 
 ## 目标

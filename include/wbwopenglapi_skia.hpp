@@ -34,6 +34,12 @@
 #include "include/core/SkPathBuilder.h"
 #include "include/core/SkSurface.h"
 #include "include/core/SkTypeface.h"
+// chrome/m152 已删除 SkFontMgr::RefDefault()；Windows 经平台工厂 SkFontMgr_New_DirectWrite
+// 获取系统字体（GN 产物已编入 skia.lib；DWrite 由 SkDWrite 动态加载，链接期零额外库）。
+// SkTypeface_win.h 内部以 SK_BUILD_FOR_WIN 守卫（SkFeatures.h 在 _WIN32 下定义）。
+#if defined(SK_BUILD_FOR_WIN)
+#include "include/ports/SkTypeface_win.h"
+#endif
 
 namespace wbwopenglapi {
 
@@ -46,10 +52,23 @@ public:
         if (!surf_) {
             throw std::runtime_error("wbwopenglapi_skia: SkSurface 创建失败");
         }
-        sk_sp<SkFontMgr> fm = SkFontMgr::RefDefault();
-        typeface_ = fm->matchFamilyStyle("Segoe UI", SkFontStyle::Normal());
-        if (!typeface_) {
-            typeface_ = fm->matchFamilyStyle(nullptr, SkFontStyle::Normal());
+        sk_sp<SkFontMgr> fm;
+#if defined(SK_BUILD_FOR_WIN)
+        // chrome/m152 无 SkFontMgr::RefDefault()，改用 DirectWrite 平台工厂（符号在 skia.lib）
+        fm = SkFontMgr_New_DirectWrite();
+#else
+        // 非 Windows：RefEmpty 保编译（空 fontmgr 无字形，文本渲染受限；
+        // 后续可接 SkFontMgr_New_Custom_Directory 等平台工厂）
+        fm = SkFontMgr::RefEmpty();
+#endif
+        if (fm) {
+            typeface_ = fm->matchFamilyStyle("Segoe UI", SkFontStyle::Normal());
+            if (!typeface_) {
+                typeface_ = fm->matchFamilyStyle(nullptr, SkFontStyle::Normal());
+            }
+            if (!typeface_) {
+                typeface_ = fm->makeFromFile("C:\\Windows\\Fonts\\segoeui.ttf", 0);
+            }
         }
         if (!typeface_) {
             typeface_ = SkTypeface::MakeEmpty();
