@@ -151,6 +151,58 @@ public:
                            static_cast<SkScalar>(a0 * 180.0 / 3.141592653589793), sweepDeg, true);
     }
     void closePath() { pathBuilder_.close(); }
+    // ellipse/roundRect（与主库语义对齐；ellipse 用参数方程折线细分，roundRect 用 SkRRect）
+    void ellipse(double cx, double cy, double rx, double ry, double rotation,
+                 double a0, double a1, bool ccw = false) {
+        if (rx <= 0.0 || ry <= 0.0) {
+            pathBuilder_.lineTo(static_cast<SkScalar>(cx), static_cast<SkScalar>(cy));
+            return;
+        }
+        const double kPi = 3.141592653589793;
+        double delta = a1 - a0;
+        if (ccw) {
+            if (delta > 0.0) delta -= 2.0 * kPi;
+        } else {
+            if (delta < 0.0) delta += 2.0 * kPi;
+        }
+        const double cosR = std::cos(rotation);
+        const double sinR = std::sin(rotation);
+        auto ellP = [&](double a) {
+            const double ca = std::cos(a) * rx;
+            const double sa = std::sin(a) * ry;
+            return std::pair<double, double>{cx + ca * cosR - sa * sinR,
+                                             cy + ca * sinR + sa * cosR};
+        };
+        const auto p0 = ellP(a0);
+        pathBuilder_.moveTo(static_cast<SkScalar>(p0.first), static_cast<SkScalar>(p0.second));
+        int n = static_cast<int>(std::ceil(std::abs(delta) / (kPi / 16.0)));
+        if (n < 8) n = 8;
+        for (int i = 1; i <= n; ++i) {
+            const auto p = ellP(a0 + delta * i / n);
+            pathBuilder_.lineTo(static_cast<SkScalar>(p.first), static_cast<SkScalar>(p.second));
+        }
+    }
+    void roundRect(double x, double y, double w, double h, double r) {
+        SkRRect rr;
+        rr.setRectXY(SkRect::MakeXYWH(static_cast<SkScalar>(x), static_cast<SkScalar>(y),
+                                      static_cast<SkScalar>(w), static_cast<SkScalar>(h)),
+                     static_cast<SkScalar>(r), static_cast<SkScalar>(r));
+        pathBuilder_.addRRect(rr);
+    }
+    void roundRect(double x, double y, double w, double h, double rTL,
+                   double rTR, double rBR, double rBL) {
+        SkRRect rr;
+        SkVector radii[4] = {
+            {static_cast<SkScalar>(rTL), static_cast<SkScalar>(rTL)},
+            {static_cast<SkScalar>(rTR), static_cast<SkScalar>(rTR)},
+            {static_cast<SkScalar>(rBR), static_cast<SkScalar>(rBR)},
+            {static_cast<SkScalar>(rBL), static_cast<SkScalar>(rBL)},
+        };
+        rr.setRectRadii(SkRect::MakeXYWH(static_cast<SkScalar>(x), static_cast<SkScalar>(y),
+                                         static_cast<SkScalar>(w), static_cast<SkScalar>(h)),
+                        radii);
+        pathBuilder_.addRRect(rr);
+    }
     // fill/stroke 复用同一路径：首次 detach 出 SkPath 后缓存，后续操作沿用（语义同旧版）
     void fill() {
         lastPath_ = pathBuilder_.detach();

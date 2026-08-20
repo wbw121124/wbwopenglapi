@@ -1656,6 +1656,97 @@ public:
         closePath();
     }
 
+    // 椭圆弧（Canvas 语义：rotation 为椭圆长轴旋转角，弧度制；
+    // 起点/终点按椭圆参数方程计算，段数与 arc 相同）
+    void ellipse(double cx, double cy, double rx, double ry, double rotation,
+                 double a0, double a1, bool ccw = false) {
+        if (rx < 0.0 || ry < 0.0) {
+            throw std::invalid_argument("wbwopenglapi: ellipse 半径不能为负");
+        }
+        if (rx == 0.0 || ry == 0.0) { // Canvas 语义：零半径退化为直线到终点
+            if (subPathPoints_ == 0) {
+                moveTo(cx, cy);
+            } else {
+                lineTo(cx, cy);
+            }
+            return;
+        }
+        double delta = a1 - a0;
+        if (ccw) {
+            if (delta > 0.0) {
+                delta -= 2.0 * detail::kPi;
+            }
+        } else {
+            if (delta < 0.0) {
+                delta += 2.0 * detail::kPi;
+            }
+        }
+        const double cosR = std::cos(rotation);
+        const double sinR = std::sin(rotation);
+        auto ellP = [&](double a) {
+            const double ca = std::cos(a) * rx;
+            const double sa = std::sin(a) * ry;
+            return std::pair<double, double>{cx + ca * cosR - sa * sinR,
+                                             cy + ca * sinR + sa * cosR};
+        };
+        const auto p0 = ellP(a0);
+        if (subPathPoints_ == 0) {
+            moveTo(p0.first, p0.second);
+        } else {
+            lineTo(p0.first, p0.second);
+        }
+        int n = static_cast<int>(std::ceil(std::abs(delta) / (detail::kPi / 16.0)));
+        if (n < 8) {
+            n = 8;
+        }
+        for (int i = 1; i <= n; ++i) {
+            const auto p = ellP(a0 + delta * i / n);
+            lineTo(p.first, p.second);
+        }
+    }
+
+    // 圆角矩形（Canvas 标准 roundRect；radius 支持单值或四角数组，
+    // 负值/0 语义：负值按 max(0, r) 钳制，0 为直角；r 过大钳制到 w/2, h/2）
+    void roundRect(double x, double y, double w, double h, double r) {
+        roundRect(x, y, w, h, r, r, r, r);
+    }
+    void roundRect(double x, double y, double w, double h, double rTL,
+                   double rTR, double rBR, double rBL) {
+        if (w < 0.0 || h < 0.0) {
+            throw std::invalid_argument("wbwopenglapi: roundRect 宽高不能为负");
+        }
+        if (w == 0.0 || h == 0.0) {
+            return; // Canvas 语义：零尺寸不产生路径
+        }
+        const double maxR = std::min(std::abs(w), std::abs(h)) / 2.0;
+        rTL = std::clamp(std::max(0.0, rTL), 0.0, maxR);
+        rTR = std::clamp(std::max(0.0, rTR), 0.0, maxR);
+        rBR = std::clamp(std::max(0.0, rBR), 0.0, maxR);
+        rBL = std::clamp(std::max(0.0, rBL), 0.0, maxR);
+        moveTo(x + rTL, y);
+        if (rTR > 0.0) {
+            arc(x + w - rTR, y + rTR, rTR, -detail::kPi / 2.0, 0.0);
+        } else {
+            lineTo(x + w, y);
+        }
+        if (rBR > 0.0) {
+            arc(x + w - rBR, y + h - rBR, rBR, 0.0, detail::kPi / 2.0);
+        } else {
+            lineTo(x + w, y + h);
+        }
+        if (rBL > 0.0) {
+            arc(x + rBL, y + h - rBL, rBL, detail::kPi / 2.0, detail::kPi);
+        } else {
+            lineTo(x, y + h);
+        }
+        if (rTL > 0.0) {
+            arc(x + rTL, y + rTL, rTL, detail::kPi, 3.0 * detail::kPi / 2.0);
+        } else {
+            lineTo(x, y);
+        }
+        closePath();
+    }
+
     // 闭合当前子路径（stroke 时首尾相连，fill 时视为闭合）
     void closePath() {
         if (subPathPoints_ == 0) {

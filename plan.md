@@ -490,3 +490,39 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
   - windows-amd64 实测：Fetch 步骤通过但编译仍 `glad/gl.h: No such file or directory`（fetch_deps.ps1 用 `& curl.exe`，msys2 setup 改 PATH 后行为不确定）→ **废弃 fetch_deps.ps1 下载 glad，改独立 bash 步骤（全平台统一）**
   - macos-arm64：cmake EACCES 为 REP 重试路径二次错误（首次失败即 glad 缺失）
   - skia-linux-arm64（exp:false）失败原因待日志；skia-linux-x86（exp:true）vcpkg install 失败待日志（日志尾部 "Completed submission of libpng… exit 1"，真正错误在被截断处）
+
+# Canvas 2D 功能补全（渐变 / ellipse / roundRect / clip / 合成 / PNG / 事件）
+
+## 目标
+- 与 Canvas 2D 标准对齐补全主库 API，并同步 Skia 封装 + napi 绑定 + 示例
+- 范围（用户确认）：P0（渐变线性+径向、ellipse、roundRect、clip、合成 12 模式）+ P1（getImageData 系列弃、改 PNG loadPNG/savePNG）+ P3（事件系统）
+- PNG 用系统 zlib（Windows MinGW 自带 libz.a、Linux 系统 libz），保持零第三方依赖定位
+- 分支 feature/canvas2d-complete（与发布任务并行；发布闭环后 merge）
+
+## 事实核查（2026-08-20 调研）
+- 渲染管线：顶点仅 Vec2 且 CPU 端已变换 NDC（hpp:1953-1956 注释）；颜色走 uniform u_color（drawSolid L2074-2075）；fillOutline stencil even-odd 两遍法（L2096-2123，画完即清 stencil）；FBO 带 DEPTH24_STENCIL8（aa.hpp:36-47）
+- fillStyle_/strokeStyle_ 为 Color（L2551-2554）；混合固定 glBlendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)（L1400）
+- 全库无 glReadPixels（读回在示例层 saveBmp/readPx）；Image/loadBMP 仅解码（L681-757）
+- 路径为命令序列 PathSeg（L338-343），渲染侧 flattenPath 处理任意序列 → 新路径命令可零渲染改动
+- Window 纯轮询（keyPressed/mousePressed/mousePosition L1367-1371），全库零 GLFW 回调注册
+- napi：renderer_wrap.cc 方法注册表 L198-256；事件类 API 完全不存在（隐藏窗口无头渲染）
+- Skia 封装（skia.hpp）：路径构建统一走 SkPathBuilder（m152 只读 SkPath）
+
+## 步骤（每步：更新本文 → git add（仅该步文件）→ commit → push）
+- [ ] 步 1/8：ellipse + roundRect（主库零渲染改动：仿 arc 参数方程折线 + moveTo/arc 组合；Skia 同步；示例 15 + napi 透传）
+- [ ] 步 2/8：渐变（Gradient 类 stops≤8 + kGradVS/FS 第二 attribute 用户空间坐标；线性投影 + 径向两圆焦点；fillStyle/strokeStyle variant）
+- [ ] 步 3/8：clip（stencil 计数：深度 d 时对 stencil==d 像素 INCR 求交，绘制 test==d；与 save/restore 集成）
+- [ ] 步 4/8：globalCompositeOperation 12 模式（6 种 blendFunc 直换 + source-in/out/atop/destination-in/atop 两遍法）
+- [ ] 步 5/8：PNG（loadPNG 解码 inflate+滤波器；savePNG/toPNG 编码 deflate+CRC32；系统 zlib）
+- [ ] 步 6/8：事件系统（Window setKeyCallback 等 GLFW 回调注册，保留轮询 API 向后兼容；napi 不接）
+- [ ] 步 7/8：napi 透传新 API（ellipse/roundRect/渐变/clip/合成/PNG）+ smoke 测试
+- [ ] 步 8/8：全量回归（01-15 示例 + napi npm test）+ merge main + 发布闭环后再打 tag
+
+## 排障记录
+（按步追加）
+
+### 步 1/8：ellipse + roundRect（修改前记录，2026-08-20）
+- 修改前：主库无 ellipse/roundRect（grep 零命中）；arc 已实现段细分（hpp:1611-1648，≤kPi/16 每段、最少 8 段）；rect 为 moveTo+3 lineTo+closePath（hpp:1651-1657）
+- 修改后（工作区未提交）：主库新增 ellipse(cx,cy,rx,ry,rotation,a0,a1,ccw)（参数方程折线细分，rotation 支持，负半径抛异常，零半径退化直线）；roundRect 单半径 + 四角数组两重载（负半径钳 0、过大钳 min(w,h)/2、零尺寸不产生路径、按 Canvas 标准 4 段 arc 组合）；Skia 封装同步（ellipse 参数方程 + roundRect SkRRect setRectXY/setRectRadii）
+- 渲染管线零改动（PathSeg 命令序列，flattenPath 通用）
+- 待验证：本机编译 + 示例 15（新建）+ napi 透传（步 7 统一做）
