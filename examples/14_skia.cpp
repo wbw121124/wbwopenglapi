@@ -98,10 +98,27 @@ int main() {
         all &= checkPx("fillRect 内部", px, 800, 600, 100, 90, 255, 128, 0, 20);
         all &= checkPx("fillCircle 中心", px, 800, 600, 400, 300, 46, 153, 181, 24);
         all &= checkPx("路径三角形", px, 800, 600, 640, 180, 46, 204, 113, 24);
-        // 文本像素存在（黑色笔画, 容差放宽）
-        const uint8_t* tp = &px[static_cast<size_t>(480) * 800 * 4 + 150 * 4];
-        const bool textOk = tp[0] < 200 && tp[1] < 200 && tp[2] < 200;
-        std::printf("  %-24s %s\n", "fillText 笔画", textOk ? "OK" : "FAIL");
+        // 文本区域统计校验（48px Segoe UI 基线 y=500：包围盒 x 100..460, y 460..505；
+        // 单点校验会命中字形空洞，区域统计容错且输出渲染位置供诊断）
+        int textDark = 0;
+        int textMinV = 255, textMinX = -1, textMinY = -1;
+        for (int yy = 460; yy < 505; ++yy) {
+            for (int xx = 100; xx < 460; ++xx) {
+                const uint8_t* q = &px[static_cast<size_t>(yy) * 800 * 4 + static_cast<size_t>(xx) * 4];
+                const int v = (static_cast<int>(q[0]) + q[1] + q[2]) / 3;
+                if (v < textMinV) {
+                    textMinV = v;
+                    textMinX = xx;
+                    textMinY = yy;
+                }
+                if (v < 150) {
+                    ++textDark;
+                }
+            }
+        }
+        const bool textOk = textDark >= 50 && textMinV < 100;
+        std::printf("  %-24s %s (深色像素 %d, 最暗 %d @(%d,%d))\n", "fillText 笔画",
+                    textOk ? "OK" : "FAIL", textDark, textMinV, textMinX, textMinY);
         all &= textOk;
         all &= checkPx("背景", px, 800, 600, 750, 560, 240, 240, 240, 10);
 
