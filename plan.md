@@ -381,6 +381,11 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 静态检查：GLOB 多模式为 CMake 标准用法；空结果走既有 FATAL_ERROR 守卫
 - 待 CI 确认：debug.yml workflow_run 触发（Skia CI success 后自动跑）
 
+### 本次修改 7（完成确认）——debug.yml e2e 全绿（run 32339234006）
+- 11/11 步骤 success：下载包→校验→Configure（包布局 lib/）→编译→icudtl→运行→BMP 上传
+- CMakeLists lib GLOB 双布局兼容生效（平铺 + lib/ 子目录），commit 1bb98fa
+- 至此两链路闭环：Skia CI（GN 直连构建验证）+ Debug e2e（发布包自包含验证）
+
 ## 排障记录
 - YAML：`run: & .\scripts\...` 开头 & 是锚点语法必须加引号；name 值内中文冒号
   须整体加引号（列间以空格分隔的 "include+libs" 写法规避）
