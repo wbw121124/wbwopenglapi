@@ -33,12 +33,28 @@ if ($HarfBuzz -and -not $harfbuzzAvailable) {
 }
 Write-Host "后端: $Backend (FreeType 可用: $freetypeAvailable, HarfBuzz 可用: $harfbuzzAvailable)"
 
+# PNG 支持：系统 zlib 探测（Windows MinGW 自带 libz.a / Linux 系统 libz）。
+# 可用 -> 启用 WBWOPENGAL_API_PNG 宏并链接 -lz；否则 19_png 编译为提示 stub。
+$pngOk = $true
+$zprobe = Join-Path $build 'zprobe.cpp'
+Set-Content -LiteralPath $zprobe -Encoding ascii -Value @'
+#include <zlib.h>
+int main() { return zlibVersion() == 0; }
+'@
+& g++ $zprobe -lz -o (Join-Path $build 'zprobe.exe') 2>$null
+if ($LASTEXITCODE -ne 0) { $pngOk = $false }
+Write-Host "PNG(zlib): $pngOk"
+
 function Compile-Example {
     param([string]$Src, [string]$Out, [string]$UseBackend)
     $cxx = 'g++'
     $args = @('-std=c++17', '-O2', '-Wall', '-Wextra',
         "-I$root\include", "-I$third\glad\include", "-I$third\glfw\include")
     $libs = @("-L$third\glfw", '-lglfw3dll', '-lopengl32')
+    if ($pngOk) {
+        $args += '-DWBWOPENGAL_API_PNG'
+        $libs += '-lz'
+    }
     if ($UseBackend -eq 'freetype') {
         $args += "-I$third\freetype\include"
         $args += '-DWBWOPENGAL_API_FONT_FREETYPE'

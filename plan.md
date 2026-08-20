@@ -513,7 +513,7 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - [x] 步 2/8：渐变（Gradient 类 stops≤8 + kGradVS/FS 第二 attribute 用户空间坐标；线性投影 + 径向两圆焦点；fillStyle/strokeStyle variant）
 - [x] 步 3/8：clip（stencil 计数：深度 d 时对 stencil==d 像素 INCR 求交，绘制 test==d；与 save/restore 集成）
 - [x] 步 4/8：globalCompositeOperation 12 模式（source-over/source-in/out/atop、destination-over/in/out/atop、lighter/copy/xor/multiply）
-- [ ] 步 5/8：PNG（loadPNG 解码 inflate+滤波器；savePNG/toPNG 编码 deflate+CRC32；系统 zlib）
+- [x] 步 5/8：PNG（loadPNG 解码 inflate+5 种滤波重建+调色板/tRNS；savePNG/toPNG 编码 deflate+CRC32；系统 zlib）
 - [ ] 步 6/8：事件系统（Window setKeyCallback 等 GLFW 回调注册，保留轮询 API 向后兼容；napi 不接）
 - [ ] 步 7/8：napi 透传新 API（ellipse/roundRect/渐变/clip/合成/PNG）+ smoke 测试
 - [ ] 步 8/8：全量回归（01-15 示例 + napi npm test）+ merge main + 发布闭环后再打 tag
@@ -560,3 +560,16 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 排障 2：示例校验点几何 —— 圆完全在矩形内导致无"src 在 dst 外"点；缩小矩形（150,150,120,120）使圆突出左缘，外部点取 (145,200)
 - **验证通过（本机）**：examples/18_composite.cpp 24 项像素校验全 OK（12 模式 × 重叠/外部两点，预期按 GL 混合方程 C=Cs*Fs+Cd*Fd 直通 alpha 存储计算），exit=0；17/16/15/12 回归全 OK（12 含 fxaa/mlaa 后处理 5 模式全绿，验证 glDisable(GL_BLEND) 无回归）
 - 待验证：napi 透传（步 7 统一做）；Skia 侧编译验证（CI 14_skia 链路）
+
+### 步 5/8：PNG（修改后记录，2026-08-20）
+- 实现（header，`WBWOPENGAL_API_PNG` 宏守卫，依赖系统 zlib；未启用时 loadPNG/savePNG/toPNG 不存在）：
+  - 解码 loadPNG（路径/内存两重载）：签名校验 → IHDR（8-bit 非隔行，colortype 0/2/3/4/6）→ PLTE/tRNS（调色板逐索引 alpha、灰度/真彩透明值）→ IDAT 拼接 → zlib inflate → 逐行滤波重建（None/Sub/Up/Average/Paeth，越界邻像素取 0）→ 转 RGBA；块 CRC 校验，损坏抛异常
+  - 编码 toPNG（RGBA 8-bit，行 filter 0，compress2 deflate）+ savePNG 落盘；CRC32 查表法（detail::pngCrc32）
+  - 构建链：build.ps1 编译期探测 zlib（-lz），可用则加宏（本机 zlib 1.2.11 ✓）；CMakeLists 增 WBWOPENGAL_API_PNG option（OFF 默认，ON 时 find_package(ZLIB)+单独构建 19_png，同 14_skia 模式；GLOB 排除 19_png）；napi 不定义宏 → 零依赖
+- 排障 1：#include <zlib.h> 初版置于命名空间内（wbwopenglapi::uLongf 等符号污染）→ 移至文件顶部 include 区（宏守卫内，命名空间外）
+- 排障 2：示例滤波行编码错误——Sub/Average/Paeth 的 left 必须取**重建值**而非滤波值（编码器语义），测试侧补 rec 重建行后 5 滤波全对
+- 排障 3：示例灰度 tRNS 期望误写 RGB=0——解码语义为"保留颜色 + alpha=0"（与调色板/真彩一致），修正期望
+- 排障 4：MinGW printf 不支持 %zu（输出字面 "zu" 且参数错位）→ 诊断改用 %u+cast
+- 排障 5：屏幕校验点（文本字形空洞/渐变蓝通道阈值误判）→ 文本改区域统计（与 14_skia 同法）、渐变点阈值按实测 (208,86,80) 修正
+- **验证通过（本机）**：examples/19_png.cpp 8 项全 OK——手工构造 5 滤波行 RGBA、调色板+tRNS、灰度+tRNS、真彩+tRNS 解码逐字节比对；画布绘制→读回→toPNG→savePNG→loadPNG 800x600 逐像素一致；屏幕渐变/圆/文本区域校验；exit=0；15/16/17/18/12 回归全 OK
+- 待验证：napi 透传（步 7 统一做，届时 napi 构建加 zlib）；Skia 侧编译验证（CI 14_skia 链路）

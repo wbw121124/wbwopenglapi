@@ -143,10 +143,33 @@ if(WBWOPENGAL_API_SKIA)
     endif()
 endif()
 
+# ---------------- PNG 可选（系统 zlib；同 14_skia 模式：ON 时单独构建 19_png） ----------------
+option(WBWOPENGAL_API_PNG "使用系统 zlib 的 PNG 读写（loadPNG/savePNG/toPNG）" OFF)
+set(WBWOPENGAL_PNG_TARGET "")
+if(WBWOPENGAL_API_PNG)
+    find_package(ZLIB REQUIRED)
+    add_executable(19_png ${WBWOPENGAL_ROOT}/examples/19_png.cpp)
+    target_include_directories(19_png PRIVATE
+        ${WBWOPENGAL_ROOT}/include
+        ${WBWOPENGAL_GLFW_INCLUDE}
+        ${WBWOPENGAL_FREETYPE_INCLUDE}
+        ${WBWOPENGAL_HARFBUZZ_INCLUDE})
+    target_compile_definitions(19_png PRIVATE WBWOPENGAL_API_PNG)
+    target_link_libraries(19_png PRIVATE glad ${WBWOPENGAL_GLFW_TARGET}
+        ${WBWOPENGAL_HARFBUZZ_TARGET} ${WBWOPENGAL_FONT_LIBS} ZLIB::ZLIB)
+    if(WIN32)
+        add_custom_command(TARGET 19_png POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${WBWOPENGAL_GLFW_DLL} $<TARGET_FILE_DIR:19_png>)
+    endif()
+endif()
+
 # ---------------- 示例 ----------------
 file(GLOB WBWOPENGAL_EXAMPLES ${WBWOPENGAL_ROOT}/examples/*.cpp)
 # 14_skia 仅在 WBWOPENGAL_API_SKIA=ON 时构建（见上）
 list(REMOVE_ITEM WBWOPENGAL_EXAMPLES ${WBWOPENGAL_ROOT}/examples/14_skia.cpp)
+# 19_png 仅在 WBWOPENGAL_API_PNG=ON 时构建（见上）
+list(REMOVE_ITEM WBWOPENGAL_EXAMPLES ${WBWOPENGAL_ROOT}/examples/19_png.cpp)
 foreach(src ${WBWOPENGAL_EXAMPLES})
     get_filename_component(name ${src} NAME_WE)
     add_executable(${name} ${src})

@@ -81,6 +81,11 @@
 #include <unordered_map>
 #include <vector>
 
+// PNG 读写（WBWOPENGAL_API_PNG）依赖系统 zlib；须在命名空间外包含（zlib.h 为 C 头）
+#if defined(WBWOPENGAL_API_PNG)
+#include <zlib.h>
+#endif
+
 // 配套头文件：
 //   lines.hpp - 像素级直线光栅化算法（DDA / Bresenham / Wu，无 GL 依赖）
 //   aa.hpp    - 抗锯齿离屏 FBO RAII 与 FXAA/MLAA 片元着色器
@@ -782,6 +787,359 @@ inline Image loadBMP(const std::string& path) {
     }
     return img;
 }
+
+// =====================================================================
+// PNG（WBWOPENGAL_API_PNG 启用；依赖系统 zlib：Windows MinGW 自带 libz.a、
+// Linux/macOS 系统 libz，零第三方下载。未启用时本段不编译）
+//   解码：8-bit 非隔行，colortype 0/2/3/4/6（灰度/真彩/调色板/灰度+alpha/RGBA），
+//         含 tRNS 透明色与 5 种滤波行（None/Sub/Up/Average/Paeth）
+//   编码：RGBA 8-bit（行 filter 0），zlib deflate
+// =====================================================================
+#ifdef WBWOPENGAL_API_PNG
+namespace detail {
+
+// PNG 标准 CRC32（多项式 0xEDB88320，查表法）
+inline uint32_t pngCrc32(const uint8_t* data, size_t len) {
+    static uint32_t table[256];
+    static const bool ready = [] {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) {
+                c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            }
+            table[i] = c;
+        }
+        return true;
+    }();
+    (void)ready;
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i) {
+        crc = table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+inline uint32_t pngBE32(const uint8_t* p) {
+    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) |
+           uint32_t(p[3]);
+}
+
+// 追加 PNG 块（length + type + data + crc；length 为 data 长度，大端）
+inline void pngWriteChunk(std::vector<uint8_t>& out, const char type[4],
+                          const uint8_t* data, size_t len) {
+    auto pushBE = [&out](uint32_t v) {
+        out.push_back(static_cast<uint8_t>(v >> 24));
+        out.push_back(static_cast<uint8_t>(v >> 16));
+        out.push_back(static_cast<uint8_t>(v >> 8));
+        out.push_back(static_cast<uint8_t>(v));
+    };
+    pushBE(static_cast<uint32_t>(len));
+    const size_t typeAt = out.size();
+    out.insert(out.end(), type, type + 4);
+    if (len > 0) {
+        out.insert(out.end(), data, data + len);
+    }
+    pushBE(pngCrc32(out.data() + typeAt, 4 + len));
+}
+
+// 读取下一 PNG 块；返回 false 表示已越界。校验 CRC，损坏抛异常。
+struct PngChunk {
+    uint8_t type[4];
+    const uint8_t* data;
+    size_t len;
+};
+
+inline bool pngNextChunk(const uint8_t* p, size_t size, size_t& pos, PngChunk& c) {
+    if (pos + 12 > size) {
+        return false;
+    }
+    c.len = pngBE32(p + pos);
+    c.type[0] = p[pos + 4];
+    c.type[1] = p[pos + 5];
+    c.type[2] = p[pos + 6];
+    c.type[3] = p[pos + 7];
+    if (pos + 12 + c.len > size) {
+        throw std::runtime_error("wbwopenglapi: PNG 块长度越界");
+    }
+    c.data = p + pos + 8;
+    const uint32_t crc = pngBE32(p + pos + 8 + c.len);
+    if (pngCrc32(p + pos + 4, 4 + c.len) != crc) {
+        throw std::runtime_error("wbwopenglapi: PNG CRC 校验失败");
+    }
+    pos += 12 + c.len;
+    return true;
+}
+
+// zlib 流解压（PNG IDAT 为 RFC1950 zlib 格式）
+inline std::vector<uint8_t> pngInflate(const uint8_t* data, size_t size) {
+    z_stream zs{};
+    if (inflateInit(&zs) != Z_OK) {
+        throw std::runtime_error("wbwopenglapi: zlib 初始化失败");
+    }
+    zs.next_in = const_cast<uint8_t*>(data);
+    zs.avail_in = static_cast<uInt>(size);
+    std::vector<uint8_t> out;
+    std::vector<uint8_t> buf(64 * 1024);
+    int ret = Z_OK;
+    while (ret != Z_STREAM_END) {
+        zs.next_out = buf.data();
+        zs.avail_out = static_cast<uInt>(buf.size());
+        ret = inflate(&zs, Z_NO_FLUSH);
+        if (ret != Z_OK && ret != Z_STREAM_END) {
+            inflateEnd(&zs);
+            throw std::runtime_error("wbwopenglapi: PNG 数据解压失败");
+        }
+        out.insert(out.end(), buf.data(), buf.data() + buf.size() - zs.avail_out);
+        if (ret == Z_OK && zs.avail_in == 0 && zs.avail_out > 0) {
+            inflateEnd(&zs);
+            throw std::runtime_error("wbwopenglapi: PNG 数据不完整");
+        }
+    }
+    inflateEnd(&zs);
+    return out;
+}
+
+// 单行滤波重建（bpp = 每像素字节数；filter 非法抛异常）
+inline void pngUnfilterRow(const uint8_t* src, uint8_t* dst, const uint8_t* prev,
+                           size_t rowBytes, int bpp, int filter) {
+    for (size_t x = 0; x < rowBytes; ++x) {
+        const uint8_t left = x >= static_cast<size_t>(bpp) ? dst[x - bpp] : 0;
+        const uint8_t up = prev[x];
+        const uint8_t upleft = x >= static_cast<size_t>(bpp) ? prev[x - bpp] : 0;
+        const uint8_t v = src[x];
+        switch (filter) {
+            case 0: // None
+                dst[x] = v;
+                break;
+            case 1: // Sub
+                dst[x] = static_cast<uint8_t>(v + left);
+                break;
+            case 2: // Up
+                dst[x] = static_cast<uint8_t>(v + up);
+                break;
+            case 3: // Average
+                dst[x] = static_cast<uint8_t>(v + ((left + up) >> 1));
+                break;
+            case 4: { // Paeth
+                const int p = static_cast<int>(left) + up - upleft;
+                const int pa = std::abs(p - left);
+                const int pb = std::abs(p - up);
+                const int pc = std::abs(p - upleft);
+                const uint8_t pred = (pa <= pb && pa <= pc) ? left
+                                     : (pb <= pc)           ? up
+                                                           : upleft;
+                dst[x] = static_cast<uint8_t>(v + pred);
+                break;
+            }
+            default:
+                throw std::runtime_error("wbwopenglapi: 未知 PNG 滤波类型");
+        }
+    }
+}
+
+} // namespace detail
+
+// 从内存解码 PNG；失败抛 std::runtime_error
+inline Image loadPNG(const uint8_t* data, size_t size) {
+    static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    if (size < 8 || std::memcmp(data, sig, 8) != 0) {
+        throw std::runtime_error("wbwopenglapi: 不是 PNG 文件");
+    }
+    int width = 0, height = 0, bitDepth = 0, colorType = -1;
+    std::vector<uint8_t> idat, plte, trns;
+    size_t pos = 8;
+    detail::PngChunk c;
+    bool haveIhdr = false;
+    while (detail::pngNextChunk(data, size, pos, c)) {
+        if (std::memcmp(c.type, "IHDR", 4) == 0) {
+            if (c.len < 13) {
+                throw std::runtime_error("wbwopenglapi: PNG IHDR 长度非法");
+            }
+            width = static_cast<int>(detail::pngBE32(c.data));
+            height = static_cast<int>(detail::pngBE32(c.data + 4));
+            bitDepth = c.data[8];
+            colorType = c.data[9];
+            if (c.data[10] != 0) {
+                throw std::runtime_error("wbwopenglapi: PNG 压缩方法非 0");
+            }
+            if (c.data[11] != 0) {
+                throw std::runtime_error("wbwopenglapi: PNG 滤波方法非 0");
+            }
+            if (c.data[12] != 0) {
+                throw std::runtime_error("wbwopenglapi: 不支持隔行(Adam7) PNG");
+            }
+            haveIhdr = true;
+        } else if (std::memcmp(c.type, "PLTE", 4) == 0) {
+            plte.assign(c.data, c.data + c.len);
+        } else if (std::memcmp(c.type, "tRNS", 4) == 0) {
+            trns.assign(c.data, c.data + c.len);
+        } else if (std::memcmp(c.type, "IDAT", 4) == 0) {
+            idat.insert(idat.end(), c.data, c.data + c.len);
+        } else if (std::memcmp(c.type, "IEND", 4) == 0) {
+            break;
+        }
+    }
+    if (!haveIhdr || width <= 0 || height <= 0) {
+        throw std::runtime_error("wbwopenglapi: PNG 缺少 IHDR 或尺寸非法");
+    }
+    if (bitDepth != 8) {
+        throw std::runtime_error("wbwopenglapi: 仅支持 8-bit PNG");
+    }
+    int channels = 0;
+    if (colorType == 0) {
+        channels = 1;
+    } else if (colorType == 2) {
+        channels = 3;
+    } else if (colorType == 3) {
+        channels = 1;
+    } else if (colorType == 4) {
+        channels = 2;
+    } else if (colorType == 6) {
+        channels = 4;
+    } else {
+        throw std::runtime_error("wbwopenglapi: 不支持的 PNG 颜色类型");
+    }
+    if (colorType == 3 && plte.empty()) {
+        throw std::runtime_error("wbwopenglapi: 调色板 PNG 缺少 PLTE");
+    }
+    if (plte.size() % 3 != 0) {
+        throw std::runtime_error("wbwopenglapi: PNG PLTE 长度非法");
+    }
+    if (idat.empty()) {
+        throw std::runtime_error("wbwopenglapi: PNG 缺少 IDAT");
+    }
+    const size_t rowBytes = static_cast<size_t>(width) * channels;
+    const size_t rawSize = static_cast<size_t>(height) * (1 + rowBytes);
+    const std::vector<uint8_t> raw = detail::pngInflate(idat.data(), idat.size());
+    if (raw.size() < rawSize) {
+        throw std::runtime_error("wbwopenglapi: PNG 数据不完整");
+    }
+    Image img;
+    img.width = width;
+    img.height = height;
+    img.rgba.reserve(static_cast<size_t>(width) * height * 4);
+    std::vector<uint8_t> prev(rowBytes, 0), row(rowBytes);
+    for (int y = 0; y < height; ++y) {
+        const size_t at = static_cast<size_t>(y) * (1 + rowBytes);
+        detail::pngUnfilterRow(raw.data() + at + 1, row.data(), prev.data(),
+                               rowBytes, channels, raw[at]);
+        const uint8_t* p = row.data();
+        for (int x = 0; x < width; ++x) {
+            uint8_t r = 0, g = 0, b = 0, a = 255;
+            if (colorType == 0) {
+                r = g = b = p[x];
+                if (trns.size() >= 2 && (trns[0] << 8 | trns[1]) == p[x]) {
+                    a = 0;
+                }
+            } else if (colorType == 2) {
+                r = p[x * 3];
+                g = p[x * 3 + 1];
+                b = p[x * 3 + 2];
+                if (trns.size() >= 3 && r == trns[0] && g == trns[1] &&
+                    b == trns[2]) {
+                    a = 0;
+                }
+            } else if (colorType == 3) {
+                const uint8_t idx = p[x];
+                if (static_cast<size_t>(idx) * 3 + 2 < plte.size()) {
+                    r = plte[idx * 3];
+                    g = plte[idx * 3 + 1];
+                    b = plte[idx * 3 + 2];
+                }
+                if (static_cast<size_t>(idx) < trns.size()) {
+                    a = trns[idx];
+                }
+            } else if (colorType == 4) {
+                r = g = b = p[x * 2];
+                a = p[x * 2 + 1];
+            } else { // 6
+                r = p[x * 4];
+                g = p[x * 4 + 1];
+                b = p[x * 4 + 2];
+                a = p[x * 4 + 3];
+            }
+            img.rgba.push_back(r);
+            img.rgba.push_back(g);
+            img.rgba.push_back(b);
+            img.rgba.push_back(a);
+        }
+        prev.swap(row);
+    }
+    return img;
+}
+
+// 从文件解码 PNG；失败抛 std::runtime_error
+inline Image loadPNG(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        throw std::runtime_error("wbwopenglapi: 无法打开图像: " + path);
+    }
+    std::vector<uint8_t> buf;
+    buf.reserve(256 * 1024);
+    int ch;
+    while ((ch = f.get()) != EOF) {
+        buf.push_back(static_cast<uint8_t>(ch));
+    }
+    return loadPNG(buf.data(), buf.size());
+}
+
+// 编码 Image 为 PNG 字节（RGBA 8-bit，filter 0）；失败抛 std::runtime_error
+inline std::vector<uint8_t> toPNG(const Image& img) {
+    if (img.width <= 0 || img.height <= 0 ||
+        img.rgba.size() < static_cast<size_t>(img.width) * img.height * 4) {
+        throw std::runtime_error("wbwopenglapi: Image 数据非法，无法编码 PNG");
+    }
+    const size_t rowBytes = static_cast<size_t>(img.width) * 4;
+    std::vector<uint8_t> raw;
+    raw.reserve(static_cast<size_t>(img.height) * (1 + rowBytes));
+    for (int y = 0; y < img.height; ++y) {
+        raw.push_back(0); // filter None
+        raw.insert(raw.end(), img.rgba.data() + static_cast<size_t>(y) * rowBytes,
+                   img.rgba.data() + static_cast<size_t>(y + 1) * rowBytes);
+    }
+    const uLongf bound = compressBound(static_cast<uLong>(raw.size()));
+    std::vector<uint8_t> comp(bound);
+    uLongf compLen = bound;
+    if (compress2(comp.data(), &compLen, raw.data(), static_cast<uLong>(raw.size()),
+                  6) != Z_OK) {
+        throw std::runtime_error("wbwopenglapi: PNG deflate 失败");
+    }
+    std::vector<uint8_t> out;
+    out.reserve(8 + 25 + compLen + 12);
+    static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    out.insert(out.end(), sig, sig + 8);
+    uint8_t ihdr[13] = {0};
+    auto be32 = [](uint8_t* q, uint32_t v) {
+        q[0] = static_cast<uint8_t>(v >> 24);
+        q[1] = static_cast<uint8_t>(v >> 16);
+        q[2] = static_cast<uint8_t>(v >> 8);
+        q[3] = static_cast<uint8_t>(v);
+    };
+    be32(ihdr, static_cast<uint32_t>(img.width));
+    be32(ihdr + 4, static_cast<uint32_t>(img.height));
+    ihdr[8] = 8;  // bit depth
+    ihdr[9] = 6;  // color type: RGBA
+    ihdr[10] = 0; // compression
+    ihdr[11] = 0; // filter
+    ihdr[12] = 0; // interlace
+    detail::pngWriteChunk(out, "IHDR", ihdr, 13);
+    detail::pngWriteChunk(out, "IDAT", comp.data(), compLen);
+    detail::pngWriteChunk(out, "IEND", nullptr, 0);
+    return out;
+}
+
+// 编码 Image 并写入文件；失败抛 std::runtime_error
+inline void savePNG(const Image& img, const std::string& path) {
+    const std::vector<uint8_t> png = toPNG(img);
+    std::ofstream f(path, std::ios::binary);
+    if (!f) {
+        throw std::runtime_error("wbwopenglapi: 无法写入图像: " + path);
+    }
+    f.write(reinterpret_cast<const char*>(png.data()),
+            static_cast<std::streamsize>(png.size()));
+}
+
+#endif // WBWOPENGAL_API_PNG
 
 // =====================================================================
 // FontFace 实现（inline 成员函数；GDI / FreeType 双后端）
