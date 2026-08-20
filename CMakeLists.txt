@@ -114,9 +114,15 @@ if(WBWOPENGAL_API_SKIA)
             ${WBWOPENGAL_API_SKIA_DIR}
             ${WBWOPENGAL_API_SKIA_DIR}/include)
         if(WIN32)
-            file(GLOB WBWOPENGAL_SKIA_LIBS "${WBWOPENGAL_API_SKIA_DIR}/*.lib")
+            # 兼容两种 SKIA_DIR 布局：GN out 平铺（*.lib 在根）与发布包（lib/ 子目录，
+            # 见 skia-ci Package 步骤与 release-skia GN 分支布局）
+            file(GLOB WBWOPENGAL_SKIA_LIBS
+                "${WBWOPENGAL_API_SKIA_DIR}/*.lib"
+                "${WBWOPENGAL_API_SKIA_DIR}/lib/*.lib")
         else()
-            file(GLOB WBWOPENGAL_SKIA_LIBS "${WBWOPENGAL_API_SKIA_DIR}/*.a")
+            file(GLOB WBWOPENGAL_SKIA_LIBS
+                "${WBWOPENGAL_API_SKIA_DIR}/*.a"
+                "${WBWOPENGAL_API_SKIA_DIR}/lib/*.a")
         endif()
         if(NOT WBWOPENGAL_SKIA_LIBS)
             message(FATAL_ERROR "WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: ${WBWOPENGAL_API_SKIA_DIR}")

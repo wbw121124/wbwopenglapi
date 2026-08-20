@@ -355,6 +355,32 @@ lld-link : error : undefined symbol: __declspec(dllimport) timeGetTime
 - 至此 Skia CI 链路（GN+LLVM chrome/m152 直连验证）全通；commit 0882ab3
 - 遗留观察项：release-skia.yml 的 vcpkg 148 组合未验证（8 平台矩阵，非本链路）
 
+### 本次修改 7（修改前记录，commit 前）——Debug (skia pack e2e) #13 失败
+**根因（debug.yml Configure 步骤，CMakeLists.txt:122 FATAL_ERROR）**：
+```
+WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-pkg/skia
+```
+- debug.yml:60 用发布包布局 SKIA_DIR=skia-pkg/skia（lib 在 lib/ 子目录，
+  debug.yml:47 校验 skia/lib/skia.lib）
+- CMakeLists.txt:117 GLOB 仅平铺 `${WBWOPENGAL_API_SKIA_DIR}/*.lib`（GN out 布局），
+  包布局的 lib/ 子目录不匹配 → FATAL_ERROR
+- include 根已双条（SKIA_DIR + SKIA_DIR/include，CMakeLists:113-115）两布局都兼容；
+  仅 lib GLOB 不兼容包布局
+
+**方案**：CMakeLists.txt:117-119 GLOB 同时匹配平铺与 lib/ 子目录：
+`"${SKIA_DIR}/*.lib" "${SKIA_DIR}/lib/*.lib"`（*.a 同理）
+- skia-ci（GN out 平铺）与 debug/release 包布局（lib/ 子目录）均兼容
+- winmm/MT 修复沿用（包内 skia.lib 为同一 GN 产物）
+
+**预期验证**：debug.yml 端到端：下载包→校验→Configure→编译→运行（像素校验）→BMP 上传
+
+### 本次修改 7（修改后记录）——已实施（commit 待 CI 验证）
+- CMakeLists.txt:116-124：lib GLOB 兼容两种布局（根平铺 + lib/ 子目录，*.lib/*.a 同理）
+- 影响面：仅 SKIA_DIR 分支；skia-ci（平铺）行为不变，debug/release 包布局（lib/）可配置
+- include 根已双条兼容，无需改动；winmm/MT 修复共用
+- 静态检查：GLOB 多模式为 CMake 标准用法；空结果走既有 FATAL_ERROR 守卫
+- 待 CI 确认：debug.yml workflow_run 触发（Skia CI success 后自动跑）
+
 ## 排障记录
 - YAML：`run: & .\scripts\...` 开头 & 是锚点语法必须加引号；name 值内中文冒号
   须整体加引号（列间以空格分隔的 "include+libs" 写法规避）
