@@ -155,3 +155,4 @@ jobs:
           name: 14_skia.bmp
           path: test/14_skia.bmp
           if-no-files-found: error
+        if: always()

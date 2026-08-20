@@ -61,6 +61,7 @@ public:
         // 后续可接 SkFontMgr_New_Custom_Directory 等平台工厂）
         fm = SkFontMgr::RefEmpty();
 #endif
+        fontMgr_ = fm;
         if (fm) {
             typeface_ = fm->matchFamilyStyle("Segoe UI", SkFontStyle::Normal());
             if (!typeface_) {
@@ -191,6 +192,24 @@ public:
         return px;
     }
 
+    // 诊断：字体链路状态（m152 DirectWrite 工厂调试用；示例 14_skia 校验前打印）
+    std::string fontStatus() const {
+        std::string s;
+        if (fontMgr_) {
+            s = "fontmgr=ok families=" + std::to_string(fontMgr_->countFamilies());
+        } else {
+            s = "fontmgr=null";
+        }
+        if (typeface_) {
+            SkString name;
+            typeface_->getFamilyName(&name);
+            s += " typeface=" + std::string(name.c_str());
+        } else {
+            s += " typeface=null";
+        }
+        return s;
+    }
+
 private:
     SkCanvas* canvas() { return surf_->getCanvas(); }
 
@@ -201,6 +220,7 @@ private:
     SkPathBuilder pathBuilder_;
     SkPath lastPath_;
     double fontPx_ = 16.0;
+    sk_sp<SkFontMgr> fontMgr_;
     sk_sp<SkTypeface> typeface_;
 };
 

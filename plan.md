@@ -287,6 +287,39 @@ lld-link : error : undefined symbol: __declspec(dllimport) timeGetTime
 - 影响面：仅 CI 构建命令；与 release-skia.yml:123 完全一致（发布链路同行为）
 - 待 CI 确认：icudtl.dat 生成后运行/打包链路（push 触发 skia-ci）
 
+### 本次修改 5（修改前记录，commit 前）——fillText 笔画 FAIL（CI run 32326959544）
+**现状（run 32326959544 用户贴出步骤输出）**：
+- 编译/链接/icudtl.dat/运行全通（修改 2/3/4 全部生效）✓
+- 唯一失败：`fillText 笔画 FAIL`（校验点 (150,480) 需 <200 灰度）
+  fillRect/fillCircle/路径/背景 全 OK，BMP 已保存
+- 文本未渲染或偏移 → 字体链路（DirectWrite 工厂/字体匹配/兜底）嫌疑最大；
+  校验点本身也可能偏（48px Segoe UI 'e' 顶部圆角边缘）
+- m152 核实（SkDWrite.cpp）：sk_get_dwrite_factory = DWriteCore.dll→dwrite.dll
+  动态加载 + DWriteCreateFactory（无 CoInitialize 依赖）→ 工厂本应可创建；
+  SkFontMgr_New_DirectWrite 内 factory null 时走该函数，失败返回 nullptr →
+  我们的代码落到 SkTypeface::MakeEmpty()（0 字形）→ 文本空白
+- 无法本地复现（MinGW 无 skia 产物）；证据不足，需 CI 诊断
+
+**方案**（一轮 CI 收集全证据，不臆造修复）：
+1. wbwopenglapi_skia.hpp：新增诊断查询 `std::string fontStatus() const`
+   （fontmgr 是否 null / countFamilies / typeface familyName），fontMgr_ 提升为成员
+2. 14_skia.cpp：fillText 后打印 fontStatus()
+3. skia-ci.yml：Upload BMP artifact 步骤加 `if: always()`（失败也可下载 BMP 目检）
+
+**预期验证**：下轮 CI 日志显示字体链路真实状态 + BMP 可下载 →
+  据此确定修复（工厂失败/字体集合空/兜底失败/校验点）
+
+### 本次修改 5（修改后记录）——已实施（commit 待 CI 验证）
+- wbwopenglapi_skia.hpp：fontMgr_ 提升为成员（构造后保留）；新增
+  `std::string fontStatus() const`（fontmgr null/ok+families 数 + typeface familyName，
+  依赖 SkString.h——已在 SkTypeface.h 传递包含，编译需 CI 确认）
+- 14_skia.cpp：fillText 后打印 `字体链路` 状态行
+- skia-ci.yml：Upload BMP artifact 加 `if: always()`（失败时也可下载目检）
+- 影响面：诊断输出零行为变更；非 SKIA 分支的 14_skia 不编译（#else return 0）零影响
+- 静态检查：countFamilies/getFamilyName 为 SkFontMgr/SkTypeface 公开接口（m152 存在，
+  头文件已包含）；sk_sp 成员可拷贝，SkiaCanvas 可复制（非预期但无害）
+- 待 CI 确认：字体链路状态 + BMP 内容 → 定位 fillText 根因
+
 ## 排障记录
 - YAML：`run: & .\scripts\...` 开头 & 是锚点语法必须加引号；name 值内中文冒号
   须整体加引号（列间以空格分隔的 "include+libs" 写法规避）

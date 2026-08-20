@@ -87,6 +87,7 @@ int main() {
         c.font(48.0);
         c.fillStyle(0.0f, 0.0f, 0.0f); // 文本
         c.fillText("Hello Skia 123", 100, 500);
+        std::printf("  %-24s %s\n", "字体链路", c.fontStatus().c_str());
 
         const std::vector<uint8_t> px = c.toRGBA();
         if (px.size() != static_cast<size_t>(800) * 600 * 4) {
