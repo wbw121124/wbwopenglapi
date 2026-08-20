@@ -543,6 +543,33 @@ struct Color {
         : r(r_), g(g_), b(b_), a(a_) {}
 };
 
+// Canvas 2D 渐变（createLinearGradient / createRadialGradient 的返回值）。
+// 渐变坐标位于用户空间（绘制时受当前变换影响）；stops 按 offset 升序。
+// Canvas 语义：addColorStop 的 offset 不在 [0,1] 时忽略。
+inline Color parseColor(const std::string& css);
+struct Gradient {
+    bool radial = false;        // false=线性(x0,y0)->(x1,y1)；true=径向两圆焦点
+    double x0 = 0, y0 = 0, r0 = 0; // 起点（线性）/内圆（径向）
+    double x1 = 0, y1 = 0, r1 = 0; // 终点（线性）/外圆（径向）
+    std::vector<std::pair<double, Color>> stops; // (offset, color) 升序，最多 8 个
+
+    void addColorStop(double offset, const Color& c) {
+        if (offset < 0.0 || offset > 1.0) {
+            return;
+        }
+        auto it = std::lower_bound(
+            stops.begin(), stops.end(), offset,
+            [](const std::pair<double, Color>& s, double o) { return s.first < o; });
+        stops.insert(it, std::make_pair(offset, c));
+        if (stops.size() > 8) {
+            stops.resize(8); // shader 数组上限 8（超出丢弃末尾，与浏览器近一致）
+        }
+    }
+    void addColorStop(double offset, const std::string& css) {
+        addColorStop(offset, parseColor(css));
+    }
+};
+
 // =====================================================================
 // 文本布局枚举
 // =====================================================================
@@ -1449,10 +1476,41 @@ public:
 
     // ---------------- 样式属性 ----------------
 
-    void fillStyle(const Color& c) { fillStyle_ = c; }
-    void fillStyle(const std::string& css) { fillStyle_ = parseColor(css); }
-    void strokeStyle(const Color& c) { strokeStyle_ = c; }
-    void strokeStyle(const std::string& css) { strokeStyle_ = parseColor(css); }
+    void fillStyle(const Color& c) {
+        fillStyle_ = c;
+        fillGrad_.reset();
+    }
+    void fillStyle(const std::string& css) { fillStyle(parseColor(css)); }
+    void fillStyle(const Gradient& g) { fillGrad_ = std::make_shared<Gradient>(g); }
+    void strokeStyle(const Color& c) {
+        strokeStyle_ = c;
+        strokeGrad_.reset();
+    }
+    void strokeStyle(const std::string& css) { strokeStyle(parseColor(css)); }
+    void strokeStyle(const Gradient& g) { strokeGrad_ = std::make_shared<Gradient>(g); }
+
+    // 创建线性渐变（用户空间坐标，绘制时受当前变换影响）
+    Gradient createLinearGradient(double x0, double y0, double x1, double y1) const {
+        Gradient g;
+        g.x0 = x0;
+        g.y0 = y0;
+        g.x1 = x1;
+        g.y1 = y1;
+        return g;
+    }
+    // 创建径向渐变（两圆焦点：内圆 (x0,y0,r0) -> 外圆 (x1,y1,r1)）
+    Gradient createRadialGradient(double x0, double y0, double r0, double x1,
+                                  double y1, double r1) const {
+        Gradient g;
+        g.radial = true;
+        g.x0 = x0;
+        g.y0 = y0;
+        g.r0 = r0;
+        g.x1 = x1;
+        g.y1 = y1;
+        g.r1 = r1;
+        return g;
+    }
 
     // 描边宽度（像素），非正数忽略（与 Canvas 语义一致）
     void lineWidth(double w) {
@@ -1520,7 +1578,7 @@ public:
             {x0, y0}, {x1, y0}, {x1, y1},
             {x0, y0}, {x1, y1}, {x0, y1},
         };
-        drawSolid(fillStyle_, tris, 6);
+        drawSolid(fillStyle_, tris, 6, nullptr, fillGrad_.get());
     }
 
     // 描边矩形（中心线沿矩形边界，宽度为 lineWidth）
@@ -1537,7 +1595,8 @@ public:
         std::vector<detail::Vec2> strip =
             detail::buildStrokeStrip(pts, true, static_cast<float>(lineWidth_));
         if (!strip.empty()) {
-            drawSolid(strokeStyle_, strip.data(), strip.size());
+            drawSolid(strokeStyle_, strip.data(), strip.size(), nullptr,
+                      strokeGrad_.get());
         }
     }
 
@@ -1757,10 +1816,10 @@ public:
     }
 
     // 用 fillStyle 填充当前路径（stencil even-odd 两遍法）
-    void fill() { fillOutline(path_, fillStyle_); }
+    void fill() { fillOutline(path_, fillStyle_, fillGrad_.get()); }
 
     // 用 strokeStyle/lineWidth 描边当前路径（复用粗线三角带）
-    void stroke() { strokeOutline(path_, strokeStyle_); }
+    void stroke() { strokeOutline(path_, strokeStyle_, true, strokeGrad_.get()); }
 
     // ---------------- 文本（矢量轮廓） ----------------
 
@@ -1932,6 +1991,8 @@ public:
         std::memcpy(e.m, current_, sizeof(current_));
         e.fillStyle = fillStyle_;
         e.strokeStyle = strokeStyle_;
+        e.fillGrad = fillGrad_;
+        e.strokeGrad = strokeGrad_;
         e.lineWidth = lineWidth_;
         e.globalAlpha = globalAlpha_;
         e.textAlign = textAlign_;
@@ -1950,6 +2011,8 @@ public:
         std::memcpy(current_, e.m, sizeof(current_));
         fillStyle_ = e.fillStyle;
         strokeStyle_ = e.strokeStyle;
+        fillGrad_ = e.fillGrad;
+        strokeGrad_ = e.strokeGrad;
         lineWidth_ = e.lineWidth;
         globalAlpha_ = e.globalAlpha;
         textAlign_ = e.textAlign;
@@ -2015,6 +2078,8 @@ private:
         float m[9];
         Color fillStyle;
         Color strokeStyle;
+        std::shared_ptr<Gradient> fillGrad;
+        std::shared_ptr<Gradient> strokeGrad;
         double lineWidth = 1.0;
         double globalAlpha = 1.0;
         TextAlign textAlign = TextAlign::Left;
@@ -2031,6 +2096,27 @@ private:
                                    a[2 * 3 + rr] * b[cc * 3 + 2];
             }
         }
+    }
+
+    // 列主序 mat3 伴随矩阵法求逆（仿射可逆矩阵）；退化返回 false
+    static bool mat3Inverse(const float* m, float* out) {
+        const float det = m[0] * (m[4] * m[8] - m[5] * m[7]) -
+                          m[3] * (m[1] * m[8] - m[2] * m[7]) +
+                          m[6] * (m[1] * m[5] - m[2] * m[4]);
+        if (std::abs(det) < 1e-12f) {
+            return false;
+        }
+        const float inv = 1.0f / det;
+        out[0] = (m[4] * m[8] - m[7] * m[5]) * inv;
+        out[1] = -(m[1] * m[8] - m[7] * m[2]) * inv;
+        out[2] = (m[1] * m[5] - m[4] * m[2]) * inv;
+        out[3] = -(m[3] * m[8] - m[6] * m[5]) * inv;
+        out[4] = (m[0] * m[8] - m[6] * m[2]) * inv;
+        out[5] = -(m[0] * m[5] - m[3] * m[2]) * inv;
+        out[6] = (m[3] * m[7] - m[6] * m[4]) * inv;
+        out[7] = -(m[0] * m[7] - m[6] * m[1]) * inv;
+        out[8] = (m[0] * m[4] - m[3] * m[1]) * inv;
+        return true;
     }
 
     // current_ = current_ * b（右乘：后调用的变换先应用）
@@ -2104,6 +2190,103 @@ void main() {
 }
 )GLSL";
 
+    // 渐变通道着色器：顶点仍为 CPU 变换后的 NDC（复用 solid 的 VAO/VBO）。
+    // 用户空间坐标由 gl_FragCoord -> NDC -> u_invM 恢复（仿射变换下与顶点
+    // 属性插值等价，且 fill 的 stencil Pass 2 全屏四边形也能正确取色）。
+    static constexpr const char* kGradVS = R"GLSL(
+#version 330 core
+layout(location = 0) in vec2 a_pos;
+void main() {
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+)GLSL";
+    static constexpr const char* kGradFS = R"GLSL(
+#version 330 core
+uniform vec4 u_color;          // rgb=1，a=globalAlpha
+uniform mat3 u_invM;           // 列主序（NDC -> 用户坐标）
+uniform vec2 u_viewport;       // 当前视口尺寸（gl_FragCoord 归一化）
+uniform int u_gradType;        // 0=线性 1=径向
+uniform vec2 u_p0;
+uniform vec2 u_p1;
+uniform float u_r0;
+uniform float u_r1;
+uniform int u_stopCount;
+uniform vec4 u_stops[8];       // rgba
+uniform float u_offsets[8];
+out vec4 frag;
+
+vec4 sampleStops(float t) {
+    int n = u_stopCount;
+    if (n <= 1) {
+        return u_stops[0];
+    }
+    if (t <= u_offsets[0]) {
+        return u_stops[0];
+    }
+    if (t >= u_offsets[n - 1]) {
+        return u_stops[n - 1];
+    }
+    for (int i = 1; i < n; ++i) {
+        if (t <= u_offsets[i]) {
+            float lo = u_offsets[i - 1];
+            float hi = u_offsets[i];
+            float k = (hi > lo) ? (t - lo) / (hi - lo) : 0.0;
+            return mix(u_stops[i - 1], u_stops[i], k);
+        }
+    }
+    return u_stops[n - 1];
+}
+
+void main() {
+    // gl_FragCoord.y 自下而上与 NDC +y 同向，直接归一化（无需翻转）
+    vec2 ndc = vec2(gl_FragCoord.x / u_viewport.x * 2.0 - 1.0,
+                    gl_FragCoord.y / u_viewport.y * 2.0 - 1.0);
+    vec3 p3 = u_invM * vec3(ndc, 1.0);
+    vec2 pos = vec2(p3.x / p3.z, p3.y / p3.z);
+    float t = 0.0;
+    if (u_gradType == 0) {
+        // 线性：沿 p0->p1 的投影
+        vec2 d = u_p1 - u_p0;
+        float len2 = dot(d, d);
+        t = len2 > 1e-12 ? clamp(dot(pos - u_p0, d) / len2, 0.0, 1.0) : 0.0;
+    } else {
+        // 径向：两圆焦点 |p - (p0 + t*d)| = r0 + t*dr 的二次方程
+        vec2 d = u_p1 - u_p0;
+        float dr = u_r1 - u_r0;
+        vec2 f = pos - u_p0;
+        float A = dot(d, d) - dr * dr;
+        float B = 2.0 * (dot(f, d) + u_r0 * dr);
+        float C = dot(f, f) - u_r0 * u_r0;
+        t = 1.0;
+        if (abs(A) > 1e-12) {
+            float disc = B * B - 4.0 * A * C;
+            if (disc >= 0.0) {
+                float sq = sqrt(disc);
+                float t1 = (B - sq) / (2.0 * A);
+                float t2 = (B + sq) / (2.0 * A);
+                float lo = min(t1, t2);
+                float hi = max(t1, t2);
+                t = lo;
+                if (t < 0.0) {
+                    t = hi;
+                }
+                if (t < 0.0) {
+                    t = 0.0; // 两根皆负：位于内圆内部
+                }
+            } else {
+                // 无交点：内圆内 -> 0，否则（外圆外）-> 1
+                t = (dot(f, f) < u_r0 * u_r0) ? 0.0 : 1.0;
+            }
+        } else if (abs(B) > 1e-12) {
+            t = C / B;
+        }
+        t = clamp(t, 0.0, 1.0);
+    }
+    vec4 col = sampleStops(t);
+    frag = vec4(col.rgb, col.a) * u_color;
+}
+)GLSL";
+
     // 逻辑像素 -> framebuffer 像素（HiDPI 缩放；宽高为 0 时退化 1:1）
     float logicalToFbX(double x) const {
         int fw = window_.framebufferWidth();
@@ -2141,12 +2324,53 @@ void main() {
         proj_[8] = 1.0f;
     }
 
+    // 惰性创建渐变通道（复用 solid 的 VAO/VBO，顶点仍是 NDC Vec2）
+    void ensureGradPipeline() {
+        if (!gradProgram_) {
+            gradProgram_ = std::make_unique<detail::Program>(kGradVS, kGradFS);
+        }
+    }
+
+    // 设置渐变 uniform（invM 为 NDC -> 用户坐标的逆矩阵，列主序）
+    void setGradUniforms(const Gradient& g, const float* invM, float alpha) {
+        glUniform4f(gradProgram_->uniform("u_color"), 1.0f, 1.0f, 1.0f, alpha);
+        glUniformMatrix3fv(gradProgram_->uniform("u_invM"), 1, GL_FALSE, invM);
+        const int vw = curTargetW_ > 0 ? curTargetW_ : window_.framebufferWidth();
+        const int vh = curTargetH_ > 0 ? curTargetH_ : window_.framebufferHeight();
+        glUniform2f(gradProgram_->uniform("u_viewport"),
+                    static_cast<float>(vw), static_cast<float>(vh));
+        glUniform1i(gradProgram_->uniform("u_gradType"), g.radial ? 1 : 0);
+        glUniform2f(gradProgram_->uniform("u_p0"),
+                    static_cast<float>(g.x0), static_cast<float>(g.y0));
+        glUniform2f(gradProgram_->uniform("u_p1"),
+                    static_cast<float>(g.x1), static_cast<float>(g.y1));
+        glUniform1f(gradProgram_->uniform("u_r0"), static_cast<float>(g.r0));
+        glUniform1f(gradProgram_->uniform("u_r1"), static_cast<float>(g.r1));
+        const size_t n = g.stops.size() > 8 ? 8 : g.stops.size();
+        glUniform1i(gradProgram_->uniform("u_stopCount"),
+                    static_cast<GLint>(n));
+        float stops[8 * 4] = {};
+        float offs[8] = {};
+        for (size_t i = 0; i < n; ++i) {
+            stops[i * 4 + 0] = g.stops[i].second.r;
+            stops[i * 4 + 1] = g.stops[i].second.g;
+            stops[i * 4 + 2] = g.stops[i].second.b;
+            stops[i * 4 + 3] = g.stops[i].second.a;
+            offs[i] = static_cast<float>(g.stops[i].first);
+        }
+        glUniform4fv(gradProgram_->uniform("u_stops"), 8, stops);
+        glUniform1fv(gradProgram_->uniform("u_offsets"), 8, offs);
+    }
+
     // 以指定颜色绘制三角形列表（含 globalAlpha）。
     // 顶点在 CPU 变换为 NDC 后上传（见 kSolidVS 注释：驱动 attribute/矩阵限制）。
     // mat 为 nullptr 时使用当前 proj_（像素坐标 -> NDC），
     // 否则使用给定矩阵（列主序 mat3，如 fill() 的全屏四边形用单位矩阵）。
+    // grad 非空时走渐变通道：invM 为 NDC -> 用户坐标逆矩阵（nullptr 时自动求
+    // 解 proj_*current_ 之逆；mat 非空且需不同逆矩阵时必须显式传入）。
     void drawSolid(const Color& c, const detail::Vec2* verts, size_t count,
-                   const float* mat = nullptr) {
+                   const float* mat = nullptr, const Gradient* grad = nullptr,
+                   const float* invM = nullptr) {
         ensureFrame(); // 抗锯齿模式：首次绘制切换离屏 FBO（本帧内只做一次）
         // mat 非空 = NDC 空间直写（如 stencil 全屏 quad），不受当前变换影响；
         // mat 为空 = 像素空间，顶点经当前变换（current_）后再投影（proj_）。
@@ -2161,6 +2385,23 @@ void main() {
             ndc[i].x = m[0] * verts[i].x + m[3] * verts[i].y + m[6];
             ndc[i].y = m[1] * verts[i].x + m[4] * verts[i].y + m[7];
         }
+        if (grad) {
+            ensureGradPipeline();
+            float im[9];
+            const float* useInv = invM;
+            if (!useInv && mat3Inverse(m, im)) {
+                useInv = im;
+            }
+            gradProgram_->use();
+            setGradUniforms(*grad, useInv ? useInv : kIdentity,
+                            static_cast<float>(globalAlpha_));
+            vao_->bind();
+            vbo_->upload(ndc.data(),
+                         static_cast<GLsizeiptr>(ndc.size() * sizeof(detail::Vec2)));
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(count));
+            glBindVertexArray(0);
+            return;
+        }
         program_->use();
         glUniform4f(program_->uniform("u_color"), c.r, c.g, c.b,
                     c.a * static_cast<float>(globalAlpha_));
@@ -2170,8 +2411,9 @@ void main() {
         glBindVertexArray(0);
     }
 
-    // stencil even-odd 两遍填充任意路径命令序列
-    void fillOutline(const std::vector<detail::PathSeg>& segs, const Color& c) {
+    // stencil even-odd 两遍填充任意路径命令序列（grad 非空时渐变着色）
+    void fillOutline(const std::vector<detail::PathSeg>& segs, const Color& c,
+                     const Gradient* grad = nullptr) {
         const std::vector<detail::SubPath> subs = detail::flattenPath(segs);
         bool hasShape = false;
         for (const detail::SubPath& sub : subs) {
@@ -2209,7 +2451,18 @@ void main() {
             {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f},
             {-1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f},
         };
-        drawSolid(c, quad, 6, kIdentity);
+        if (grad) {
+            // 渐变：全屏四边形无用户坐标，改由 frag 内经 u_invM 恢复
+            float m2[9], invM[9];
+            matMul(proj_, current_, m2);
+            if (mat3Inverse(m2, invM)) {
+                drawSolid(c, quad, 6, kIdentity, grad, invM);
+            } else {
+                drawSolid(c, quad, 6, kIdentity);
+            }
+        } else {
+            drawSolid(c, quad, 6, kIdentity);
+        }
         glDisable(GL_STENCIL_TEST);
         glClear(GL_STENCIL_BUFFER_BIT);
     }
@@ -2471,11 +2724,18 @@ void main() {
 
     // 描边任意路径命令序列（逐子路径）。
     // pixelOk=false 时强制走矢量三角带（strokeText 字体轮廓用，避免像素化）
-    void strokeOutline(const std::vector<detail::PathSeg>& segs, const Color& c,
-                       bool pixelOk = true) {
+void strokeOutline(const std::vector<detail::PathSeg>& segs, const Color& c,
+                   bool pixelOk = true, const Gradient* grad = nullptr) {
         if (pixelOk && lineAlgorithm_ != detail::LineAlgo::Default) {
             strokePixels(segs, c);
             return;
+        }
+        float invM[9];
+        bool haveInv = false;
+        if (grad) {
+            float m2[9];
+            matMul(proj_, current_, m2);
+            haveInv = mat3Inverse(m2, invM);
         }
         const std::vector<detail::SubPath> subs = detail::flattenPath(segs);
         for (const detail::SubPath& sub : subs) {
@@ -2485,7 +2745,8 @@ void main() {
             std::vector<detail::Vec2> strip = detail::buildStrokeStrip(
                 sub.points, sub.closed, static_cast<float>(lineWidth_));
             if (!strip.empty()) {
-                drawSolid(c, strip.data(), strip.size());
+                drawSolid(c, strip.data(), strip.size(), nullptr, grad,
+                          haveInv ? invM : nullptr);
             }
         }
     }
@@ -2597,9 +2858,9 @@ void main() {
                 segs.push_back(t);
             }
             if (fill) {
-                fillOutline(segs, fillStyle_);
+                fillOutline(segs, fillStyle_, fillGrad_.get());
             } else {
-                strokeOutline(segs, strokeStyle_, false); // 字体轮廓始终矢量描边
+                strokeOutline(segs, strokeStyle_, false, strokeGrad_.get()); // 字体轮廓始终矢量描边
             }
         };
         if (!shaped.empty()) {
@@ -2639,8 +2900,13 @@ void main() {
     std::unique_ptr<detail::VertexBuffer> texVbo_;
     std::unique_ptr<detail::Texture> tex_;
 
+    // 渐变通道（复用 solid 的 vao_/vbo_）
+    std::unique_ptr<detail::Program> gradProgram_;
+
     Color fillStyle_{0.0f, 0.0f, 0.0f, 1.0f};
     Color strokeStyle_{0.0f, 0.0f, 0.0f, 1.0f};
+    std::shared_ptr<Gradient> fillGrad_;   // 非空时填充样式为渐变
+    std::shared_ptr<Gradient> strokeGrad_; // 非空时描边样式为渐变
     double lineWidth_ = 1.0;
     double globalAlpha_ = 1.0;
 

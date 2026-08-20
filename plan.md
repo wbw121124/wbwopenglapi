@@ -527,3 +527,18 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 渲染管线零改动（PathSeg 命令序列，flattenPath 通用）
 - **验证通过（本机）**：新建 examples/15_roundrect.cpp（单/四角半径 roundRect + 半径钳制 + 旋转椭圆 + 椭圆弧 stroke + roundRect stroke），build.ps1 编译运行 -t 10 项像素校验全 OK，exit=0
 - 待验证：napi 透传（步 7 统一做）；Skia 侧编译验证（CI 14_skia 链路）
+
+### 步 2/8：渐变（修改前记录，2026-08-20）
+- 修改前：fillStyle/strokeStyle 仅 Color（hpp:1452-1455）；drawSolid 单 u_color uniform；fillOutline Pass 2 全屏四边形 NDC 直写（无用户坐标可插值）；无 Gradient 类
+- 方案调整：不引入第二 attribute（fillOutline Pass 2 全屏四边形无法携带路径用户坐标），改为 frag 中 gl_FragCoord -> NDC -> 逆矩阵(u_invM) 恢复用户坐标：仿射变换下 NDC 插值 = 用户空间线性插值，对 fill/stroke/Pass2 全屏统一成立；径向渐变用两圆焦点二次方程解 t（Canvas 规范算法），线性用投影 t
+- 步骤：新增 public Gradient（radial/x0y0r0/x1y1r1/stops 升序，addColorStop 越界 [0,1] 忽略）；Canvas fillStyle/strokeStyle 渐变重载 + fillGrad_/strokeGrad_ + StackEntry 保存恢复；createLinearGradient/createRadialGradient；kGradVS/kGradFS + gradProgram_（复用 solid VAO/VBO，location 0 仍是 NDC）；drawSolid 增 grad+invM 参数（mat==nullptr 时自动求 proj_*current_ 之逆）；fillOutline Pass 2 / strokeOutline / fillRect / strokeRect / fillText / strokeText 全链路传渐变；mat3Inverse 伴随矩阵法（列主序）
+- 影响面：仅新增路径，无既有行为变更（默认样式非渐变走原 solid 通道）
+
+### 步 2/8：渐变（修改后记录，2026-08-20）
+- 实现：public Gradient 结构（radial 标志 + 两圆参数 + stops 升序插入，addColorStop 越界 [0,1] 忽略，上限 8）；Canvas 增加 createLinearGradient/createRadialGradient + fillStyle/strokeStyle 渐变重载 + fillGrad_/strokeGrad_（shared_ptr）+ StackEntry 保存/恢复；kGradVS/kGradFS 渐变通道（复用 solid VAO/VBO，顶点仍为 NDC）；drawSolid 增 grad+invM 参数（mat 为空自动求 proj_*current_ 逆；fillOutline Pass 2 显式传逆）；fillOutline/strokeOutline/fillRect/strokeRect/fillText/strokeText 全链路传渐变；mat3Inverse 伴随矩阵法（列主序，含解析验证）
+- 关键设计：frag 内 gl_FragCoord -> NDC -> u_invM 恢复用户坐标（仿射下与属性插值等价，且解决 fillOutline Pass 2 全屏四边形无用户坐标的问题）；径向渐变两圆焦点二次方程 + 小非负根规则（两根皆负=内圆内 t=0，无实根按内圆内/外圆外判 0/1）；r0>r1 时交换两圆并反转 stops（规范同）
+- 排障 1：ndc_y 误加 (viewport.y-fragCoord.y) 翻转（fragCoord.y 已自下而上），导致用户坐标 y 镜像 → 径向/变换渐变错位；移除翻转后 4 处观测值精确吻合（含 g4 反推验证）
+- 排障 2：径向根选取初版设 t1 优先 + 负根回退 1.0 → 内圆内部点（两根皆负）错误取外缘色；改为 min/max 小非负根，两根皆负回退 0.0
+- 排障 3：示例校验点坐标碰撞（g2 对角点被后续 roundRect/■ 块覆盖；■ 字形实际宽约 65px 非满 em 96px）——扫描行确认字形范围后定点
+- **验证通过（本机）**：examples/16_gradient.cpp 16 项像素校验全 OK（线性 3 点+钳制、变换联动对角、径向同心/偏心焦点、渐变 stroke、渐变文本），exit=0
+- 待验证：napi 透传（步 7 统一做）；Skia 侧编译验证（CI 14_skia 链路）
