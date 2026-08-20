@@ -1821,6 +1821,65 @@ public:
     // 用 strokeStyle/lineWidth 描边当前路径（复用粗线三角带）
     void stroke() { strokeOutline(path_, strokeStyle_, true, strokeGrad_.get()); }
 
+    // 用当前路径与现有裁剪区域求交，作为新的裁剪区域（Canvas 语义）。
+    // 空路径不改变裁剪；嵌套层数上限 127（超出抛 std::runtime_error）。
+    // 后续所有绘制（fill/stroke/rect/text/image/像素线条）都被限制在裁剪区域内；
+    // 与 save()/restore() 集成：restore 恢复保存时的裁剪深度。
+    void clip() {
+        const std::vector<detail::SubPath> subs = detail::flattenPath(path_);
+        bool hasShape = false;
+        for (const detail::SubPath& sub : subs) {
+            if (sub.points.size() >= 3) {
+                hasShape = true;
+                break;
+            }
+        }
+        if (!hasShape) {
+            return;
+        }
+        if (clipDepth_ >= 0x7F) {
+            throw std::runtime_error("wbwopenglapi: clip 嵌套过深（上限 127）");
+        }
+        ensureFrame();
+        glEnable(GL_STENCIL_TEST);
+        // 1. 清第 7 位（全屏，只写第 7 位=0；低 7 位深度保留）
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        glStencilMask(0x80);
+        drawFullQuad();
+        // 2. 裁剪区域内做 even-odd（第 7 位翻转）
+        glStencilFunc(GL_EQUAL, clipDepth_, 0x7F);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
+        glStencilMask(0x80);
+        for (const detail::SubPath& sub : subs) {
+            const size_t n = sub.points.size();
+            if (n < 3) {
+                continue;
+            }
+            const detail::Vec2& p0 = sub.points[0];
+            for (size_t i = 1; i + 1 < n; ++i) {
+                const detail::Vec2 tris[3] = {p0, sub.points[i],
+                                              sub.points[i + 1]};
+                drawSolid(Color(), tris, 3, nullptr, nullptr, nullptr, false);
+            }
+        }
+        // 3. 折叠：第 7 位=1 处 INCR（0x80|d +1 -> 低 7 位 = d+1，第 7 位暂存 1）
+        glStencilFunc(GL_EQUAL, clipDepth_ | 0x80, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+        glStencilMask(0xFF);
+        drawFullQuad();
+        // 4. 清第 7 位
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        glStencilMask(0x80);
+        drawFullQuad();
+        glStencilMask(0xFF);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        ++clipDepth_;
+        syncClipState();
+    }
+
     // ---------------- 文本（矢量轮廓） ----------------
 
 // 设置字体: "16px sans-serif"（取字号，字体名忽略）或字体文件路径
@@ -1998,6 +2057,7 @@ public:
         e.textAlign = textAlign_;
         e.textBaseline = textBaseline_;
         e.fontCss = fontCss_;
+        e.clipDepth = clipDepth_;
         stack_.push_back(e);
     }
 
@@ -2020,6 +2080,23 @@ public:
         if (fontCss_ != e.fontCss) {
             font(e.fontCss);
         }
+        if (e.clipDepth < clipDepth_) {
+            // 降级：把残留深度（旧裁剪区域）降为恢复后的深度，防止与新深度冲突。
+            // 用 GL_LESS：ref=target 时 pass 条件 (ref&mask) < (stencil&mask)，
+            // 即 stencil 大于 target 的像素通过，REPLACE 写回 target。
+            glEnable(GL_STENCIL_TEST);
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            glStencilFunc(GL_LESS, e.clipDepth, 0xFF);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            glStencilMask(0xFF);
+            // 规避 Intel 驱动 stencil 陈旧读：折叠写入后紧接的 stencil 测试可能读到
+            // 旧值，glFlush 强制提交前序命令（合规驱动上为无操作）。
+            glFlush();
+            drawFullQuad();
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        }
+        clipDepth_ = e.clipDepth;
+        syncClipState();
     }
 
     // ---------------- 图像 ----------------
@@ -2055,6 +2132,7 @@ public:
             ndc[i].py = m[1] * src[i].px + m[4] * src[i].py + m[7];
         }
         ensureFrame(); // 抗锯齿模式：首次绘制切换离屏 FBO
+        applyClipGuard();
         texProgram_->use();
         glUniform4f(texProgram_->uniform("u_color"), 1.0f, 1.0f, 1.0f,
                     static_cast<float>(globalAlpha_));
@@ -2085,6 +2163,7 @@ private:
         TextAlign textAlign = TextAlign::Left;
         TextBaseline textBaseline = TextBaseline::Alphabetic;
         std::string fontCss;
+        int clipDepth = 0;
     };
 
     // 列主序 mat3 乘法: out = a * b
@@ -2362,16 +2441,66 @@ void main() {
         glUniform1fv(gradProgram_->uniform("u_offsets"), 8, offs);
     }
 
+    // stencil 位分配：低 7 位 = clip 深度（0..127），第 7 位 = even-odd 临时位。
+    // 裁剪区域像素的低 7 位 == clipDepth_；无裁剪时 clipDepth_ == 0。
+
+    // 帧首/恢复时同步 stencil 开关：无裁剪禁用测试，有裁剪启用并限制到当前深度
+    void syncClipState() {
+        if (clipDepth_ == 0) {
+            glDisable(GL_STENCIL_TEST);
+        } else {
+            glEnable(GL_STENCIL_TEST);
+            glStencilMask(0xFF);
+            glStencilFunc(GL_EQUAL, clipDepth_, 0x7F);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        }
+    }
+
+    // 绘制前把 stencil 限制到当前裁剪区域（无裁剪时保持 GL 现状）
+    void applyClipGuard() {
+        if (clipDepth_ > 0) {
+            glEnable(GL_STENCIL_TEST);
+            glStencilMask(0xFF);
+            glStencilFunc(GL_EQUAL, clipDepth_, 0x7F);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        }
+    }
+
+    // 全屏 NDC 四边形（单位矩阵；调用方需先配置好 stencil 状态）
+    void drawFullQuad(const Color& c = Color(0.0f, 0.0f, 0.0f, 1.0f),
+                      const Gradient* grad = nullptr) {
+        const detail::Vec2 quad[6] = {
+            {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f},
+            {-1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f},
+        };
+        if (grad) {
+            float m2[9], invM[9];
+            matMul(proj_, current_, m2);
+            if (mat3Inverse(m2, invM)) {
+                drawSolid(c, quad, 6, kIdentity, grad, invM, false);
+            } else {
+                drawSolid(c, quad, 6, kIdentity, nullptr, nullptr, false);
+            }
+        } else {
+            drawSolid(c, quad, 6, kIdentity, nullptr, nullptr, false);
+        }
+    }
+
     // 以指定颜色绘制三角形列表（含 globalAlpha）。
     // 顶点在 CPU 变换为 NDC 后上传（见 kSolidVS 注释：驱动 attribute/矩阵限制）。
     // mat 为 nullptr 时使用当前 proj_（像素坐标 -> NDC），
     // 否则使用给定矩阵（列主序 mat3，如 fill() 的全屏四边形用单位矩阵）。
     // grad 非空时走渐变通道：invM 为 NDC -> 用户坐标逆矩阵（nullptr 时自动求
     // 解 proj_*current_ 之逆；mat 非空且需不同逆矩阵时必须显式传入）。
+    // clipGuard 为 true（默认）时若存在裁剪区域（clipDepth_>0），先启用 stencil
+    // 限制到当前裁剪区域；fillOutline 内部自行管理 stencil 时传 false。
     void drawSolid(const Color& c, const detail::Vec2* verts, size_t count,
                    const float* mat = nullptr, const Gradient* grad = nullptr,
-                   const float* invM = nullptr) {
+                   const float* invM = nullptr, bool clipGuard = true) {
         ensureFrame(); // 抗锯齿模式：首次绘制切换离屏 FBO（本帧内只做一次）
+        if (clipGuard) {
+            applyClipGuard();
+        }
         // mat 非空 = NDC 空间直写（如 stencil 全屏 quad），不受当前变换影响；
         // mat 为空 = 像素空间，顶点经当前变换（current_）后再投影（proj_）。
         float m[9];
@@ -2411,7 +2540,9 @@ void main() {
         glBindVertexArray(0);
     }
 
-    // stencil even-odd 两遍填充任意路径命令序列（grad 非空时渐变着色）
+    // stencil even-odd 两遍填充任意路径命令序列（grad 非空时渐变着色）。
+    // 与 clip 兼容：even-odd 临时位使用第 7 位，仅在裁剪区域（低 7 位==clipDepth_）
+    // 内生效，绘制后清理第 7 位并保留低 7 位深度。
     void fillOutline(const std::vector<detail::PathSeg>& segs, const Color& c,
                      const Gradient* grad = nullptr) {
         const std::vector<detail::SubPath> subs = detail::flattenPath(segs);
@@ -2425,11 +2556,11 @@ void main() {
         if (!hasShape) {
             return;
         }
-        // Pass 1: 轮廓三角扇写入 stencil（GL_INVERT -> even-odd）
+        // Pass 1: 轮廓三角扇写入第 7 位（GL_INVERT -> even-odd），仅限裁剪区域
         glEnable(GL_STENCIL_TEST);
-        glStencilMask(0xFF);
+        glStencilMask(0x80);
         glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilFunc(GL_EQUAL, clipDepth_, 0x7F);
         glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
         for (const detail::SubPath& sub : subs) {
             const size_t n = sub.points.size();
@@ -2440,31 +2571,23 @@ void main() {
             for (size_t i = 1; i + 1 < n; ++i) {
                 const detail::Vec2 tris[3] = {p0, sub.points[i],
                                               sub.points[i + 1]};
-                drawSolid(c, tris, 3);
+                drawSolid(c, tris, 3, nullptr, nullptr, nullptr, false);
             }
         }
-        // Pass 2: stencil 非零区域上色（单位矩阵 + NDC 全屏四边形）
+        // Pass 2: 裁剪区 ∩ 路径内部（第 7 位=1）上色
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+        glStencilFunc(GL_EQUAL, clipDepth_ | 0x80, 0xFF);
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        const detail::Vec2 quad[6] = {
-            {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f},
-            {-1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f},
-        };
-        if (grad) {
-            // 渐变：全屏四边形无用户坐标，改由 frag 内经 u_invM 恢复
-            float m2[9], invM[9];
-            matMul(proj_, current_, m2);
-            if (mat3Inverse(m2, invM)) {
-                drawSolid(c, quad, 6, kIdentity, grad, invM);
-            } else {
-                drawSolid(c, quad, 6, kIdentity);
-            }
-        } else {
-            drawSolid(c, quad, 6, kIdentity);
-        }
-        glDisable(GL_STENCIL_TEST);
-        glClear(GL_STENCIL_BUFFER_BIT);
+        drawFullQuad(c, grad);
+        // 清理第 7 位（保留低 7 位 clip 深度）
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        glStencilMask(0x80);
+        drawFullQuad();
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glStencilMask(0xFF);
+        syncClipState();
     }
 
     // ---------------- 像素级线条（lineAlgorithm != "default"） ----------------
@@ -2559,6 +2682,7 @@ void main() {
         }
         ensurePixelPipeline();
         ensureFrame(); // 抗锯齿模式：离屏绘制
+        applyClipGuard();
         const int fw = curTargetW_ > 0 ? curTargetW_ : window_.framebufferWidth();
         const int fh = curTargetH_ > 0 ? curTargetH_ : window_.framebufferHeight();
         struct PVertex {
@@ -2631,6 +2755,10 @@ void main() {
         aaFbo_->bindDraw();
         glViewport(0, 0, fw * scale, fh * scale);
         updateViewport();
+        clipDepth_ = 0; // 新帧：stencil 已清零，裁剪深度归零
+        // 帧首清空 stencil（裁剪区域随帧失效）
+        // 每帧起始清空 stencil（clip 深度从 0 开始；fill 不再清整块 stencil）
+        glClear(GL_STENCIL_BUFFER_BIT);
     }
 
     // 帧末：按模式把离屏结果 resolve 到默认 framebuffer。
@@ -2909,6 +3037,7 @@ void strokeOutline(const std::vector<detail::PathSeg>& segs, const Color& c,
     std::shared_ptr<Gradient> strokeGrad_; // 非空时描边样式为渐变
     double lineWidth_ = 1.0;
     double globalAlpha_ = 1.0;
+    int clipDepth_ = 0; // 当前裁剪深度（0=无裁剪；低 7 位深度 + 第 7 位临时 even-odd）
 
     std::vector<detail::PathSeg> path_;
     int subPathPoints_ = 0; // 当前子路径点数（arc 自动连线判断）

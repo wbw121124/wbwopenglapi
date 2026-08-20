@@ -509,9 +509,9 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - Skia 封装（skia.hpp）：路径构建统一走 SkPathBuilder（m152 只读 SkPath）
 
 ## 步骤（每步：更新本文 → git add（仅该步文件）→ commit → push）
-- [ ] 步 1/8：ellipse + roundRect（主库零渲染改动：仿 arc 参数方程折线 + moveTo/arc 组合；Skia 同步；示例 15 + napi 透传）
-- [ ] 步 2/8：渐变（Gradient 类 stops≤8 + kGradVS/FS 第二 attribute 用户空间坐标；线性投影 + 径向两圆焦点；fillStyle/strokeStyle variant）
-- [ ] 步 3/8：clip（stencil 计数：深度 d 时对 stencil==d 像素 INCR 求交，绘制 test==d；与 save/restore 集成）
+- [x] 步 1/8：ellipse + roundRect（主库零渲染改动：仿 arc 参数方程折线 + moveTo/arc 组合；Skia 同步；示例 15 + napi 透传）
+- [x] 步 2/8：渐变（Gradient 类 stops≤8 + kGradVS/FS 第二 attribute 用户空间坐标；线性投影 + 径向两圆焦点；fillStyle/strokeStyle variant）
+- [x] 步 3/8：clip（stencil 计数：深度 d 时对 stencil==d 像素 INCR 求交，绘制 test==d；与 save/restore 集成）
 - [ ] 步 4/8：globalCompositeOperation 12 模式（6 种 blendFunc 直换 + source-in/out/atop/destination-in/atop 两遍法）
 - [ ] 步 5/8：PNG（loadPNG 解码 inflate+滤波器；savePNG/toPNG 编码 deflate+CRC32；系统 zlib）
 - [ ] 步 6/8：事件系统（Window setKeyCallback 等 GLFW 回调注册，保留轮询 API 向后兼容；napi 不接）
@@ -541,4 +541,13 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 排障 2：径向根选取初版设 t1 优先 + 负根回退 1.0 → 内圆内部点（两根皆负）错误取外缘色；改为 min/max 小非负根，两根皆负回退 0.0
 - 排障 3：示例校验点坐标碰撞（g2 对角点被后续 roundRect/■ 块覆盖；■ 字形实际宽约 65px 非满 em 96px）——扫描行确认字形范围后定点
 - **验证通过（本机）**：examples/16_gradient.cpp 16 项像素校验全 OK（线性 3 点+钳制、变换联动对角、径向同心/偏心焦点、渐变 stroke、渐变文本），exit=0
+- 待验证：napi 透传（步 7 统一做）；Skia 侧编译验证（CI 14_skia 链路）
+
+### 步 3/8：clip（修改后记录，2026-08-20）
+- 实现：stencil 位分配（低 7 位 = clip 深度 0..127，第 7 位 = even-odd 临时位）；clip() 四遍法（清第 7 位 → 裁剪区域内路径三角扇 INVERT 做 even-odd → 第 7 位=1 处 INCR 折叠为深度+1 → 再清第 7 位）；syncClipState/applyClipGuard（绘制前把 stencil 限制到低 7 位==clipDepth_，无裁剪禁用测试）；save() 记录 clipDepth、restore() 降级残留深度；StackEntry 增 clipDepth；drawSolid 增 clipGuard 参数（fillOutline 等内部 stencil 管理传 false）；fillOutline 临时位改第 7 位且仅在裁剪区域内翻转（与 clip 兼容）；beginFrame 每帧清 stencil + clipDepth_ 归零；drawImage/像素线条也经 applyClipGuard
+- 排障 1：restore 降级用 GL_GREATER —— GL 语义 (ref&mask) > (stencil&mask) 方向相反，ref=0 永不通过、ref=1 反而把 0 提升为 1 → 恢复后整屏残留 1，后续 clip 区域错误放大（示例表现为第 4 段橙覆盖全屏）；改 GL_LESS（ref < stencil 即 stencil>target 通过，REPLACE 写回 target）
+- 排障 2：Intel UHD 630 驱动 stencil 陈旧读 —— 折叠写入后紧接的 stencil 测试读到旧值（降级不生效），glReadPixels/glFinish/glFlush 任一可强制提交（glGetError/glGetIntegerv 无效）；demote 全屏绘制前加 glFlush() 规避（合规驱动为无操作）
+- 排障 3：读回目标错误 —— 示例/诊断 glReadPixels 读的是默认 framebuffer（FBO 仅绑 DRAW），读到上一帧/全 0；校验改为测试前 ctx.resolve()（present 后 FBO 绑为 READ）
+- 排障 4：两圆重叠区预期 —— even-odd 下重叠区是洞（异或），非并集；修正示例注释与校验点为背景色
+- **验证通过（本机）**：examples/17_clip.cpp 14 项像素校验全 OK（矩形/圆形 clip + 渐变填充、嵌套矩形∩圆、两圆 even-odd、clip stroke、clip 渐变文本、restore 后全屏），exit=0；15/16/12 回归全 OK
 - 待验证：napi 透传（步 7 统一做）；Skia 侧编译验证（CI 14_skia 链路）
