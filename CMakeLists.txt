@@ -127,6 +127,9 @@ if(WBWOPENGAL_API_SKIA)
             # ClangCL 目标默认 /MD 会触发 lld-link /failifmismatch RuntimeLibrary mismatch
             # → 14_skia 对齐为静态 CRT（CMake 3.15+ 属性，ClangCL frontend variant=MSVC 生效）
             set_target_properties(14_skia PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+            # skia.lib 内部 obj 引用 timeGetTime（Windows Multimedia API，GN 侧 BUILD.gn
+            # 自带 winmm.lib），CMake 直连产物需补链，否则 lld-link undefined symbol
+            target_link_libraries(14_skia PRIVATE winmm)
         endif()
     else()
         find_package(skia CONFIG REQUIRED)

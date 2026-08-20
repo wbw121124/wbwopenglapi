@@ -243,6 +243,30 @@ SKIA_DIR 编译（debug.yml:58-60 同链路）共同受益，一处修复两处�
 - debug.yml 同链路（SKIA_DIR 直连编译）自动受益，无需单独改
 - 待 CI 确认：链接通过后运行/打包链路（push 触发 skia-ci）
 
+### 本次修改 3（修改前记录，commit 前）——undefined symbol: timeGetTime（CI run 32324418077 失败）
+**根因（run 32324418077 17_Build 步骤日志）**：
+```
+lld-link : error : undefined symbol: __declspec(dllimport) timeGetTime
+```
+- RuntimeLibrary mismatch 已消失（修改 2 的 MSVC_RUNTIME_LIBRARY 生效）✓
+- timeGetTime 为 Windows Multimedia API（winmm.lib 提供）；仓库代码（含示例/头文件）
+  无引用 → 来源为 skia.lib 内部 obj（GN 构建时其 BUILD.gn 对链接目标自带 winmm.lib，
+  CMake 直连产物侧未补 → 链接期 undefined symbol）
+- 失败点=链接期，编译已通过
+
+**方案**：CMakeLists.txt SKIA_DIR 分支 WIN32 下 `target_link_libraries(14_skia PRIVATE winmm)`
+（仅直连分支；vcpkg 分支 skiaConfig.cmake 自带依赖不涉及）
+
+**预期验证**：ClangCL 编译 14_skia → 链接通过（winmm 补齐）→ 运行（icudtl.dat 已拷）→
+文本像素校验 → exit=0 → 打包 tar.gz
+
+### 本次修改 3（修改后记录）——已实施（commit 待 CI 验证）
+- CMakeLists.txt:130-135：SKIA_DIR 分支 WIN32 下新增 `target_link_libraries(14_skia PRIVATE winmm)`
+- 影响面：仅 SKIA_DIR 直连 + Windows；vcpkg 分支、非 Windows、常规示例零影响
+- 静态检查：winmm 为 Windows 系统库（Win10+ SDK 自带），无版本依赖；GN 侧 BUILD.gn
+  对链接目标同样依赖 winmm → 与 GN 行为一致
+- 待 CI 确认：链接通过后运行/打包链路（push 触发 skia-ci）
+
 ## 排障记录
 - YAML：`run: & .\scripts\...` 开头 & 是锚点语法必须加引号；name 值内中文冒号
   须整体加引号（列间以空格分隔的 "include+libs" 写法规避）
