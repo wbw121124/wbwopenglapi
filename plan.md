@@ -348,6 +348,13 @@ lld-link : error : undefined symbol: __declspec(dllimport) timeGetTime
 - 静态检查：数组索引均在 800x600 边界内（460<800, 505<600）；纯整型运算无溢出
 - 待 CI 确认：区域统计通过 + 打包/上传完成（push 触发 skia-ci）
 
+### 本次修改 6（完成确认）——CI run 32330470965 全绿
+- 22/22 步骤 success：编译→链接→icudtl→运行(像素校验)→打包→tar.gz→双 artifact 上传
+- 14_skia 文本区域统计校验通过（fillText 笔画 OK）——渲染链路正常，原单点校验
+  命中字形空洞为历史遗留（vcpkg 时代从未在 CI 验证过），区域统计已修复
+- 至此 Skia CI 链路（GN+LLVM chrome/m152 直连验证）全通；commit 0882ab3
+- 遗留观察项：release-skia.yml 的 vcpkg 148 组合未验证（8 平台矩阵，非本链路）
+
 ## 排障记录
 - YAML：`run: & .\scripts\...` 开头 & 是锚点语法必须加引号；name 值内中文冒号
   须整体加引号（列间以空格分隔的 "include+libs" 写法规避）
