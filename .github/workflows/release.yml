@@ -76,8 +76,8 @@ jobs:
         if: matrix.os == 'macos'
         run: brew install cmake glfw freetype
 
-      # ---------------- third_party（Windows x64/x86 需下载；arm64 核心包仅头文件） ----------------
-      - name: Fetch GLFW + GLAD (Windows)
+      # ---------------- third_party（Windows x64/x86 需下载 GLFW；GLAD 全平台下载） ----------------
+      - name: Fetch GLFW (Windows)
         if: matrix.os == 'windows' && matrix.arch != 'arm64'
         shell: pwsh
         run: |
@@ -107,8 +107,27 @@ jobs:
             Copy-Item -Force (Join-Path $root 'lib-mingw-w64\glfw3.dll') $third\glfw\
             Copy-Item -Force (Join-Path $root 'lib-mingw-w64\libglfw3.a') $third\glfw\
           }
-          # glad（fetch_deps 仅下载 glad；GLFW 已就绪）
-          & .\scripts\fetch_deps.ps1 -SkipGLFW -SkipFreeType
+
+      - name: Fetch GLAD (all platforms)
+        if: matrix.napi == true
+        shell: bash
+        run: |
+          set -e
+          mkdir -p third_party/glad/include third_party/glad/src
+          cd "$RUNNER_TEMP"
+          curl -s -D glad_headers.txt -o /dev/null \
+            -F 'generator=c' -F 'specification=gl' -F 'api=gl=3.3' -F 'profile=gl=core' \
+            -F 'language=c' -F 'extensions=none' -F 'output=glad.zip' \
+            'https://gen.glad.sh/generate'
+          LOC=$(grep -i '^Location:' glad_headers.txt | head -1 | tr -d '\r' | sed 's/^[Ll]ocation: *//')
+          if [ -z "$LOC" ]; then echo "no Location from gen.glad.sh"; exit 1; fi
+          curl -sL --fail "https://gen.glad.sh${LOC}/glad.zip" -o glad.zip
+          mkdir -p glad_x
+          unzip -q -o glad.zip -d glad_x
+          cp -r glad_x/include/glad "$GITHUB_WORKSPACE/third_party/glad/include/"
+          cp -r glad_x/include/KHR "$GITHUB_WORKSPACE/third_party/glad/include/"
+          cp glad_x/src/gl.c "$GITHUB_WORKSPACE/third_party/glad/src/"
+          ls "$GITHUB_WORKSPACE/third_party/glad/include/glad/gl.h"
 
       - name: MinGW 工具链入 PATH
         if: matrix.os == 'windows' && matrix.napi == true

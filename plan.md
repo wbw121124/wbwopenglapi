@@ -478,3 +478,15 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 
 ## 排障记录
 （按步追加）
+
+### v0.0.1-alpha 发布第 1 轮（2026-08-20）
+- 触发：tag v0.0.1-alpha → Release（主包）+ Release Skia 两 workflow
+- **修复 1（commit 11c4cb5）**：matrix 布尔比较失效（GitHub 2024 表达式变更：布尔 true 与字符串 'true' 不再隐式转换）
+  - release-skia.yml：`matrix.gn == 'true'` → `== true`（9 处）、`matrix.windows == 'true'` → `== true`；修复前 windows-amd64 走 vcpkg 分支（37m47s）+ Package 步骤 bash `[ "true" = "true" ]` 命中 GN 分支 `cp skia/include` 但源码未 checkout → 失败
+  - release.yml：`matrix.napi/native == 'true'` → `== true`
+  - 重打 tag v0.0.1-alpha → Release Skia 32342835529 + Release 32342835521
+- **修复 2（本步）**：主包 Release 全平台失败根因 = glad 缺失
+  - 证据：napi/CMakeLists.txt:71 无条件 `target_include_directories(... third_party/glad/include)`；wbwopenglapi.hpp:66 无条件 `#include <glad/gl.h>`；release.yml 仅 Windows 步骤调 fetch_deps.ps1 下载 glad（Linux/macOS 无任何 glad 获取）
+  - windows-amd64 实测：Fetch 步骤通过但编译仍 `glad/gl.h: No such file or directory`（fetch_deps.ps1 用 `& curl.exe`，msys2 setup 改 PATH 后行为不确定）→ **废弃 fetch_deps.ps1 下载 glad，改独立 bash 步骤（全平台统一）**
+  - macos-arm64：cmake EACCES 为 REP 重试路径二次错误（首次失败即 glad 缺失）
+  - skia-linux-arm64（exp:false）失败原因待日志；skia-linux-x86（exp:true）vcpkg install 失败待日志（日志尾部 "Completed submission of libpng… exit 1"，真正错误在被截断处）
