@@ -1526,6 +1526,19 @@ public:
         globalAlpha_ = a;
     }
 
+    // 合成模式（Canvas globalCompositeOperation 语义，12 种；未知值保持当前不变）。
+    // 因子见 applyComposite()：全部模式单遍 glBlendFunc 即可表达
+    // （DST_ALPHA/DST_COLOR 系因子，无需两遍法）。
+    void globalCompositeOperation(const std::string& name) {
+        if (name == "source-over" || name == "source-in" || name == "source-out" ||
+            name == "source-atop" || name == "destination-over" ||
+            name == "destination-in" || name == "destination-out" ||
+            name == "destination-atop" || name == "lighter" || name == "copy" ||
+            name == "xor" || name == "multiply") {
+            composite_ = name;
+        }
+    }
+
     // 线条光栅化算法（仅影响用户路径 stroke()；strokeText/strokeRect 始终矢量描边）
     //   "default"   三角带矢量描边（默认，= 现有行为；尊重 lineWidth）
     //   "dda"       逐像素直线（1px，无抗锯齿，阶梯锯齿）
@@ -1605,6 +1618,7 @@ public:
         if (w <= 0.0 || h <= 0.0) {
             return;
         }
+        ensureFrame(); // 确保清除目标是离屏 FBO（clear() 同样先切换）
         float sx = logicalToFbX(x);
         float sy = logicalToFbY(y);
         float sw = logicalToFbX(x + w) - sx;
@@ -2054,6 +2068,7 @@ public:
         e.strokeGrad = strokeGrad_;
         e.lineWidth = lineWidth_;
         e.globalAlpha = globalAlpha_;
+        e.composite = composite_;
         e.textAlign = textAlign_;
         e.textBaseline = textBaseline_;
         e.fontCss = fontCss_;
@@ -2075,6 +2090,7 @@ public:
         strokeGrad_ = e.strokeGrad;
         lineWidth_ = e.lineWidth;
         globalAlpha_ = e.globalAlpha;
+        composite_ = e.composite;
         textAlign_ = e.textAlign;
         textBaseline_ = e.textBaseline;
         if (fontCss_ != e.fontCss) {
@@ -2133,6 +2149,7 @@ public:
         }
         ensureFrame(); // 抗锯齿模式：首次绘制切换离屏 FBO
         applyClipGuard();
+        applyComposite();
         texProgram_->use();
         glUniform4f(texProgram_->uniform("u_color"), 1.0f, 1.0f, 1.0f,
                     static_cast<float>(globalAlpha_));
@@ -2160,6 +2177,7 @@ private:
         std::shared_ptr<Gradient> strokeGrad;
         double lineWidth = 1.0;
         double globalAlpha = 1.0;
+        std::string composite = "source-over";
         TextAlign textAlign = TextAlign::Left;
         TextBaseline textBaseline = TextBaseline::Alphabetic;
         std::string fontCss;
@@ -2466,6 +2484,50 @@ void main() {
         }
     }
 
+    // 按当前合成模式设置混合因子（source-over = 直通 alpha，与历史行为一致）。
+    // 直通 alpha 存储下 GL 混合方程：C = Cs*Fs + Cd*Fd，A = As*Fs + Ad*Fd。
+    //   source-over        (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+    //   source-in          (DST_ALPHA, ZERO)
+    //   source-out         (ONE_MINUS_DST_ALPHA, ZERO)
+    //   source-atop        (DST_ALPHA, ONE_MINUS_SRC_ALPHA)
+    //   destination-over   (ONE_MINUS_DST_ALPHA, ONE)
+    //   destination-in     (ZERO, SRC_ALPHA)
+    //   destination-out    (ZERO, ONE_MINUS_SRC_ALPHA)
+    //   destination-atop   (ONE_MINUS_DST_ALPHA, SRC_ALPHA)
+    //   lighter            (ONE, ONE)
+    //   copy               (ONE, ZERO)
+    //   xor                (ONE_MINUS_DST_ALPHA, ONE_MINUS_SRC_ALPHA)
+    //   multiply           (DST_COLOR, ZERO)
+    void applyComposite() {
+        glEnable(GL_BLEND);
+        const std::string& m = composite_;
+        if (m == "source-in") {
+            glBlendFunc(GL_DST_ALPHA, GL_ZERO);
+        } else if (m == "source-out") {
+            glBlendFunc(GL_ONE_MINUS_DST_ALPHA, GL_ZERO);
+        } else if (m == "source-atop") {
+            glBlendFunc(GL_DST_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        } else if (m == "destination-over") {
+            glBlendFunc(GL_ONE_MINUS_DST_ALPHA, GL_ONE);
+        } else if (m == "destination-in") {
+            glBlendFunc(GL_ZERO, GL_SRC_ALPHA);
+        } else if (m == "destination-out") {
+            glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+        } else if (m == "destination-atop") {
+            glBlendFunc(GL_ONE_MINUS_DST_ALPHA, GL_SRC_ALPHA);
+        } else if (m == "lighter") {
+            glBlendFunc(GL_ONE, GL_ONE);
+        } else if (m == "copy") {
+            glBlendFunc(GL_ONE, GL_ZERO);
+        } else if (m == "xor") {
+            glBlendFunc(GL_ONE_MINUS_DST_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        } else if (m == "multiply") {
+            glBlendFunc(GL_DST_COLOR, GL_ZERO);
+        } else { // source-over
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+    }
+
     // 全屏 NDC 四边形（单位矩阵；调用方需先配置好 stencil 状态）
     void drawFullQuad(const Color& c = Color(0.0f, 0.0f, 0.0f, 1.0f),
                       const Gradient* grad = nullptr) {
@@ -2501,6 +2563,7 @@ void main() {
         if (clipGuard) {
             applyClipGuard();
         }
+        applyComposite();
         // mat 非空 = NDC 空间直写（如 stencil 全屏 quad），不受当前变换影响；
         // mat 为空 = 像素空间，顶点经当前变换（current_）后再投影（proj_）。
         float m[9];
@@ -2683,6 +2746,7 @@ void main() {
         ensurePixelPipeline();
         ensureFrame(); // 抗锯齿模式：离屏绘制
         applyClipGuard();
+        applyComposite();
         const int fw = curTargetW_ > 0 ? curTargetW_ : window_.framebufferWidth();
         const int fh = curTargetH_ > 0 ? curTargetH_ : window_.framebufferHeight();
         struct PVertex {
@@ -2782,6 +2846,9 @@ void main() {
                               GL_COLOR_BUFFER_BIT, GL_LINEAR);
         } else {
             // FXAA / MLAA 后处理（全屏四边形，复用纹理通道 VAO）
+            // 后处理四边形必须直写窗口（不参与合成混合；下一帧首个绘制会经
+            // applyComposite() 重新开启并设置因子）
+            glDisable(GL_BLEND);
             ensurePostPipeline();
             glViewport(0, 0, fw, fh);
             if (antialias_ == "fxaa") {
@@ -3037,6 +3104,7 @@ void strokeOutline(const std::vector<detail::PathSeg>& segs, const Color& c,
     std::shared_ptr<Gradient> strokeGrad_; // 非空时描边样式为渐变
     double lineWidth_ = 1.0;
     double globalAlpha_ = 1.0;
+    std::string composite_ = "source-over"; // globalCompositeOperation（见 applyComposite）
     int clipDepth_ = 0; // 当前裁剪深度（0=无裁剪；低 7 位深度 + 第 7 位临时 even-odd）
 
     std::vector<detail::PathSeg> path_;

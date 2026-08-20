@@ -512,7 +512,7 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - [x] 步 1/8：ellipse + roundRect（主库零渲染改动：仿 arc 参数方程折线 + moveTo/arc 组合；Skia 同步；示例 15 + napi 透传）
 - [x] 步 2/8：渐变（Gradient 类 stops≤8 + kGradVS/FS 第二 attribute 用户空间坐标；线性投影 + 径向两圆焦点；fillStyle/strokeStyle variant）
 - [x] 步 3/8：clip（stencil 计数：深度 d 时对 stencil==d 像素 INCR 求交，绘制 test==d；与 save/restore 集成）
-- [ ] 步 4/8：globalCompositeOperation 12 模式（6 种 blendFunc 直换 + source-in/out/atop/destination-in/atop 两遍法）
+- [x] 步 4/8：globalCompositeOperation 12 模式（source-over/source-in/out/atop、destination-over/in/out/atop、lighter/copy/xor/multiply）
 - [ ] 步 5/8：PNG（loadPNG 解码 inflate+滤波器；savePNG/toPNG 编码 deflate+CRC32；系统 zlib）
 - [ ] 步 6/8：事件系统（Window setKeyCallback 等 GLFW 回调注册，保留轮询 API 向后兼容；napi 不接）
 - [ ] 步 7/8：napi 透传新 API（ellipse/roundRect/渐变/clip/合成/PNG）+ smoke 测试
@@ -550,4 +550,13 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 排障 3：读回目标错误 —— 示例/诊断 glReadPixels 读的是默认 framebuffer（FBO 仅绑 DRAW），读到上一帧/全 0；校验改为测试前 ctx.resolve()（present 后 FBO 绑为 READ）
 - 排障 4：两圆重叠区预期 —— even-odd 下重叠区是洞（异或），非并集；修正示例注释与校验点为背景色
 - **验证通过（本机）**：examples/17_clip.cpp 14 项像素校验全 OK（矩形/圆形 clip + 渐变填充、嵌套矩形∩圆、两圆 even-odd、clip stroke、clip 渐变文本、restore 后全屏），exit=0；15/16/12 回归全 OK
+- 待验证：napi 透传（步 7 统一做）；Skia 侧编译验证（CI 14_skia 链路）
+
+### 步 4/8：globalCompositeOperation（修改后记录，2026-08-20）
+- 实现：Canvas::globalCompositeOperation(name)（12 种；未知值保持当前不变）+ composite_ 成员 + applyComposite()（按模式设置 glBlendFunc，绘制前调用）+ StackEntry 保存/恢复 + drawSolid/drawImage/drawPixels 三绘制路径接入；present() 的 FXAA/MLAA 后处理前 glDisable(GL_BLEND)（后处理四边形必须直写窗口，下一帧首个绘制经 applyComposite 重新开启）
+- **方案调整（原计划两遍法取消）**：全部 12 模式单遍 glBlendFunc 即可表达（利用 DST_ALPHA/DST_COLOR 系因子），无需两遍法：
+  source-over=(SRC_ALPHA,ONE_MINUS_SRC_ALPHA)（= 既有直通 alpha 行为，向后兼容）、source-in=(DST_ALPHA,ZERO)、source-out=(ONE_MINUS_DST_ALPHA,ZERO)、source-atop=(DST_ALPHA,ONE_MINUS_SRC_ALPHA)、destination-over=(ONE_MINUS_DST_ALPHA,ONE)、destination-in=(ZERO,SRC_ALPHA)、destination-out=(ZERO,ONE_MINUS_SRC_ALPHA)、destination-atop=(ONE_MINUS_DST_ALPHA,SRC_ALPHA)、lighter=(ONE,ONE)、copy=(ONE,ZERO)、xor=(ONE_MINUS_DST_ALPHA,ONE_MINUS_SRC_ALPHA)、multiply=(DST_COLOR,ZERO)
+- 排障 1：clearRect 不触发 ensureFrame() —— resolve()/present() 后 framebuffer 绑回默认 0，帧首 clearRect 的 glClear 打到窗口而非 FBO，FBO 颜色跨迭代残留（校验外部点逐轮被旧内容混合污染，实测值与残留方程逐轮吻合）；clearRect 首行补 ensureFrame()（与 clear() 一致），FBO 清除目标正确
+- 排障 2：示例校验点几何 —— 圆完全在矩形内导致无"src 在 dst 外"点；缩小矩形（150,150,120,120）使圆突出左缘，外部点取 (145,200)
+- **验证通过（本机）**：examples/18_composite.cpp 24 项像素校验全 OK（12 模式 × 重叠/外部两点，预期按 GL 混合方程 C=Cs*Fs+Cd*Fd 直通 alpha 存储计算），exit=0；17/16/15/12 回归全 OK（12 含 fxaa/mlaa 后处理 5 模式全绿，验证 glDisable(GL_BLEND) 无回归）
 - 待验证：napi 透传（步 7 统一做）；Skia 侧编译验证（CI 14_skia 链路）
