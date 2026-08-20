@@ -46,7 +46,7 @@ jobs:
         run: python scripts/export-config.py >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v4
-        if: matrix.napi == 'true'
+        if: matrix.napi == true
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -66,7 +66,7 @@ jobs:
           fi
 
       - uses: msys2/setup-msys2@v2
-        if: matrix.os == 'windows' && matrix.napi == 'true'
+        if: matrix.os == 'windows' && matrix.napi == true
         with:
           msystem: ${{ matrix.msystem }}
           install: >-
@@ -111,12 +111,12 @@ jobs:
           & .\scripts\fetch_deps.ps1 -SkipGLFW -SkipFreeType
 
       - name: MinGW 工具链入 PATH
-        if: matrix.os == 'windows' && matrix.napi == 'true'
+        if: matrix.os == 'windows' && matrix.napi == true
         run: echo "C:\msys64\${{ matrix.msystem }}\bin" | Out-File -Append $env:GITHUB_PATH
 
       # ---------------- 构建 Node 插件 ----------------
       - name: Build napi
-        if: matrix.napi == 'true'
+        if: matrix.napi == true
         working-directory: napi
         env:
           PKG_CONFIG_LIBDIR: ${{ matrix.arch == 'x86' && '/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig' || '' }}
@@ -126,7 +126,7 @@ jobs:
           npm run build
 
       - name: Test napi (native)
-        if: matrix.napi == 'true' && matrix.native == 'true'
+        if: matrix.napi == true && matrix.native == true
         working-directory: napi
         shell: bash
         run: |
@@ -148,7 +148,7 @@ jobs:
           tar -C dist/core -czf wbwopenglapi-$OST-$ARCH.tar.gz .
 
       - name: Package napi
-        if: matrix.napi == 'true'
+        if: matrix.napi == true
         working-directory: napi
         shell: bash
         run: |
@@ -161,7 +161,7 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
-        if: matrix.napi == 'true'
+        if: matrix.napi == true
         with:
           name: wbw-napi-${{ matrix.os }}-${{ matrix.arch }}
           path: wbwopenglapi-napi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz

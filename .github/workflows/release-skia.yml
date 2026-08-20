@@ -50,7 +50,7 @@ jobs:
 
       # ---------------- GN+LLVM 方案（windows-amd64，Build-Skia 已验证链路） ----------------
       - name: Checkout Skia source (chrome stable 对应分支)
-        if: matrix.gn == 'true'
+        if: matrix.gn == true
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SKIA_REPO }}
@@ -58,7 +58,7 @@ jobs:
           path: skia
 
       - name: Setup depot_tools
-        if: matrix.gn == 'true'
+        if: matrix.gn == true
         shell: pwsh
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
@@ -66,7 +66,7 @@ jobs:
           & .\depot_tools\gclient.bat
 
       - name: Install LLVM and Ninja
-        if: matrix.gn == 'true'
+        if: matrix.gn == true
         shell: pwsh
         run: |
           choco install llvm ninja -y --limit-output
@@ -74,13 +74,13 @@ jobs:
           echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Setup Visual Studio environment (clang 运行时库/头)
-        if: matrix.gn == 'true'
+        if: matrix.gn == true
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
 
       - name: Fix Clang directory structure for Skia
-        if: matrix.gn == 'true'
+        if: matrix.gn == true
         shell: pwsh
         run: |
           $clangDir = "C:\Program Files\LLVM"
@@ -94,7 +94,7 @@ jobs:
           }
 
       - name: Cache Skia dependencies
-        if: matrix.gn == 'true'
+        if: matrix.gn == true
         uses: actions/cache@v4
         with:
           path: |
@@ -103,20 +103,20 @@ jobs:
           key: skia-gn-${{ env.SKIA_BRANCH }}-${{ hashFiles('skia/DEPS') }}
 
       - name: Sync dependencies (git-sync-deps)
-        if: matrix.gn == 'true'
+        if: matrix.gn == true
         working-directory: skia
         shell: cmd
         run: python tools/git-sync-deps
 
       - name: Generate build files with GN (LLVM x64)
-        if: matrix.gn == 'true'
+        if: matrix.gn == true
         working-directory: skia
         shell: cmd
         run: |
           gn gen out/Release-x64 --args="is_debug=false is_official_build=true skia_use_system_expat=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=false skia_use_freetype=true skia_use_harfbuzz=true skia_pdf_subset_harfbuzz=true skia_use_system_freetype2=false skia_use_system_harfbuzz=false target_cpu=\"x64\" clang_win=\"C:\Program Files\LLVM\" win_vc=\"C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\" extra_cflags=[\"-MT\", \"-Wno-attributes\"]"
 
       - name: Build with Ninja
-        if: matrix.gn == 'true'
+        if: matrix.gn == true
         working-directory: skia
         shell: cmd
         run: |
@@ -124,7 +124,7 @@ jobs:
 
       # ---------------- vcpkg+clang 方案（其余 7 组合） ----------------
       - name: Linux deps (clang / x86 multilib)
-        if: matrix.os == 'linux' && matrix.gn != 'true'
+        if: matrix.os == 'linux' && matrix.gn != true
         run: |
           set -e
           sudo apt-get update
@@ -137,19 +137,19 @@ jobs:
           fi
 
       - name: Add LLVM to PATH (Windows)
-        if: matrix.windows == 'true' && matrix.gn != 'true'
+        if: matrix.windows == true && matrix.gn != true
         shell: pwsh
         run: echo "C:\Program Files\LLVM\bin" | Out-File -Append $env:GITHUB_PATH
 
       - name: Checkout vcpkg
-        if: matrix.gn != 'true'
+        if: matrix.gn != true
         uses: actions/checkout@v4
         with:
           repository: ${{ env.VCPKG_REPO }}
           path: vcpkg
 
       - uses: actions/cache@v4
-        if: matrix.gn != 'true'
+        if: matrix.gn != true
         with:
           path: ${{ github.workspace }}/vcpkg_installed
           key: skia-${{ matrix.triplet }}-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
@@ -158,13 +158,13 @@ jobs:
       - name: Bootstrap vcpkg
         shell: pwsh
         run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-        if: matrix.gn != 'true' && matrix.os == 'windows'
+        if: matrix.gn != true && matrix.os == 'windows'
       - name: Bootstrap vcpkg
         run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
-        if: matrix.gn != 'true' && matrix.os != 'windows'
+        if: matrix.gn != true && matrix.os != 'windows'
 
       - name: Prepare clang toolchain file
-        if: matrix.gn != 'true'
+        if: matrix.gn != true
         shell: bash
         run: |
           if [ "${{ matrix.windows }}" = "true" ]; then
@@ -193,12 +193,12 @@ jobs:
         env:
           VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
         run: .\vcpkg\vcpkg.exe install --triplet ${{ matrix.triplet }}
-        if: matrix.gn != 'true' && matrix.os == 'windows'
+        if: matrix.gn != true && matrix.os == 'windows'
       - name: vcpkg install skia (clang, manifest)
         env:
           VCPKG_CHAINLOAD_TOOLCHAIN_FILE: ${{ github.workspace }}/toolchain.cmake
         run: ./vcpkg/vcpkg install --triplet ${{ matrix.triplet }}
-        if: matrix.gn != 'true' && matrix.os != 'windows'
+        if: matrix.gn != true && matrix.os != 'windows'
 
       # ---------------- 打包（统一布局：include/lib/bin） ----------------
       - name: Package skia
