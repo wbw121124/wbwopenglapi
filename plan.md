@@ -267,6 +267,26 @@ lld-link : error : undefined symbol: __declspec(dllimport) timeGetTime
   对链接目标同样依赖 winmm → 与 GN 行为一致
 - 待 CI 确认：链接通过后运行/打包链路（push 触发 skia-ci）
 
+### 本次修改 4（修改前记录，commit 前）——icudtl.dat 缺失（CI run 32325948363 失败）
+**根因（run 32325948363 job 96297091155，steps 状态 + 13_Build 日志）**：
+- 链接已通过（修改 3 的 winmm 补齐生效，step 17 成功）✓
+- step 18 Copy icudtl.dat 失败（exit 1，页面 annotations: "1 error" 于该步骤）
+- 13_Build 日志（1383 步，末行为 link skia.lib）无任何 icudtl 行 → 产物未生成
+- 对比 release-skia.yml:123 `ninja -C out/Release-x64 skia modules`（发布链路，212 行
+  依赖 icudtl.dat 拷贝）→ icudtl.dat 由 modules target 链生成；skia-ci.yml:94 仅
+  `ninja -C out/Release-x64 skia` 不含 modules → 缺 icudtl.dat → step 18 源不存在
+
+**方案**：skia-ci.yml:94 对齐 release-skia.yml:123：`ninja -C out/Release-x64 skia modules`
+（同发布链路行为，产物含 icudtl.dat；modules 为既有 target 名，非新增库）
+
+**预期验证**：Build with Ninja 生成 icudtl.dat → step 18 Copy 成功 → 运行 14_skia
+（icudtl.dat 就位，DirectWrite 有字形）→ 文本像素校验 → exit=0 → 打包 tar.gz
+
+### 本次修改 4（修改后记录）——已实施（commit 待 CI 验证）
+- skia-ci.yml:94：`ninja -C out/Release-x64 skia` → `ninja -C out/Release-x64 skia modules`
+- 影响面：仅 CI 构建命令；与 release-skia.yml:123 完全一致（发布链路同行为）
+- 待 CI 确认：icudtl.dat 生成后运行/打包链路（push 触发 skia-ci）
+
 ## 排障记录
 - YAML：`run: & .\scripts\...` 开头 & 是锚点语法必须加引号；name 值内中文冒号
   须整体加引号（列间以空格分隔的 "include+libs" 写法规避）

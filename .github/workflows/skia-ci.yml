@@ -91,7 +91,7 @@ jobs:
         working-directory: skia
         shell: cmd
         run: |
-          ninja -C out/Release-x64 skia
+          ninja -C out/Release-x64 skia modules
 
       - name: "Bundle include into GN out dir (SKIA_DIR 自包含 include+libs)"
         shell: pwsh
