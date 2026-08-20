@@ -74,6 +74,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -1707,6 +1708,17 @@ public:
         }
 
         glfwSwapInterval(1); // 垂直同步
+
+        // 事件回调钩子：GLFW 回调 -> 用户指针取回 Window -> std::function 分发
+        glfwSetWindowUserPointer(window_, this);
+        glfwSetKeyCallback(window_, windowKeyCallback);
+        glfwSetCharCallback(window_, windowCharCallback);
+        glfwSetMouseButtonCallback(window_, windowMouseButtonCallback);
+        glfwSetCursorPosCallback(window_, windowCursorPosCallback);
+        glfwSetScrollCallback(window_, windowScrollCallback);
+        glfwSetCursorEnterCallback(window_, windowCursorEnterCallback);
+        glfwSetFramebufferSizeCallback(window_, windowFramebufferSizeCallback);
+        glfwSetWindowCloseCallback(window_, windowCloseCallback);
     }
 
     ~Window() {
@@ -1755,6 +1767,29 @@ public:
     }
     void mousePosition(double& x, double& y) const { glfwGetCursorPos(window_, &x, &y); }
 
+    // ---- 事件回调（GLFW 回调注册；与轮询 API 并存，向后兼容）----
+    // 各回调参数与 GLFW 一致；用户指针经窗口用户指针取回本 Window 实例分发。
+    // 通过 nativeHandle() 自行注册 GLFW 回调会覆盖这里的钩子（不推荐混用）。
+    using KeyCallback = std::function<void(int key, int scancode, int action, int mods)>;
+    using CharCallback = std::function<void(unsigned int codepoint)>;
+    using MouseButtonCallback = std::function<void(int button, int action, int mods)>;
+    using CursorPosCallback = std::function<void(double x, double y)>;
+    using ScrollCallback = std::function<void(double xoffset, double yoffset)>;
+    using CursorEnterCallback = std::function<void(int entered)>;
+    using FramebufferSizeCallback = std::function<void(int width, int height)>;
+    using CloseCallback = std::function<void()>;
+
+    void setKeyCallback(KeyCallback cb) { keyCb_ = std::move(cb); }
+    void setCharCallback(CharCallback cb) { charCb_ = std::move(cb); }
+    void setMouseButtonCallback(MouseButtonCallback cb) { mouseButtonCb_ = std::move(cb); }
+    void setCursorPosCallback(CursorPosCallback cb) { cursorPosCb_ = std::move(cb); }
+    void setScrollCallback(ScrollCallback cb) { scrollCb_ = std::move(cb); }
+    void setCursorEnterCallback(CursorEnterCallback cb) { cursorEnterCb_ = std::move(cb); }
+    void setFramebufferSizeCallback(FramebufferSizeCallback cb) {
+        framebufferSizeCb_ = std::move(cb);
+    }
+    void setCloseCallback(CloseCallback cb) { closeCb_ = std::move(cb); }
+
     GLFWwindow* nativeHandle() const { return window_; }
 
     // 内部：Canvas 构造/析构时注册注销（用于 swapBuffers 前触发 present）
@@ -1769,9 +1804,80 @@ public:
     }
 
 private:
+    // GLFW 回调分发（静态；经窗口用户指针取回 Window 实例）
+    static Window* windowOf(GLFWwindow* w) {
+        return static_cast<Window*>(glfwGetWindowUserPointer(w));
+    }
+    static void windowKeyCallback(GLFWwindow* w, int key, int scancode, int action,
+                                  int mods) {
+        if (Window* self = windowOf(w)) {
+            if (self->keyCb_) {
+                self->keyCb_(key, scancode, action, mods);
+            }
+        }
+    }
+    static void windowCharCallback(GLFWwindow* w, unsigned int codepoint) {
+        if (Window* self = windowOf(w)) {
+            if (self->charCb_) {
+                self->charCb_(codepoint);
+            }
+        }
+    }
+    static void windowMouseButtonCallback(GLFWwindow* w, int button, int action,
+                                          int mods) {
+        if (Window* self = windowOf(w)) {
+            if (self->mouseButtonCb_) {
+                self->mouseButtonCb_(button, action, mods);
+            }
+        }
+    }
+    static void windowCursorPosCallback(GLFWwindow* w, double x, double y) {
+        if (Window* self = windowOf(w)) {
+            if (self->cursorPosCb_) {
+                self->cursorPosCb_(x, y);
+            }
+        }
+    }
+    static void windowScrollCallback(GLFWwindow* w, double x, double y) {
+        if (Window* self = windowOf(w)) {
+            if (self->scrollCb_) {
+                self->scrollCb_(x, y);
+            }
+        }
+    }
+    static void windowCursorEnterCallback(GLFWwindow* w, int entered) {
+        if (Window* self = windowOf(w)) {
+            if (self->cursorEnterCb_) {
+                self->cursorEnterCb_(entered);
+            }
+        }
+    }
+    static void windowFramebufferSizeCallback(GLFWwindow* w, int width, int height) {
+        if (Window* self = windowOf(w)) {
+            if (self->framebufferSizeCb_) {
+                self->framebufferSizeCb_(width, height);
+            }
+        }
+    }
+    static void windowCloseCallback(GLFWwindow* w) {
+        if (Window* self = windowOf(w)) {
+            if (self->closeCb_) {
+                self->closeCb_();
+            }
+        }
+    }
+
     GLFWwindow* window_ = nullptr;
     std::shared_ptr<detail::GlfwLife> glfwLife_;
     std::vector<class Canvas*> attached_;
+    KeyCallback keyCb_;
+    CharCallback charCb_;
+    MouseButtonCallback mouseButtonCb_;
+    CursorPosCallback cursorPosCb_;
+    ScrollCallback scrollCb_;
+    CursorEnterCallback cursorEnterCb_;
+    FramebufferSizeCallback framebufferSizeCb_;
+    CloseCallback closeCb_;
 };
 
 // =====================================================================

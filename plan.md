@@ -514,7 +514,7 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - [x] 步 3/8：clip（stencil 计数：深度 d 时对 stencil==d 像素 INCR 求交，绘制 test==d；与 save/restore 集成）
 - [x] 步 4/8：globalCompositeOperation 12 模式（source-over/source-in/out/atop、destination-over/in/out/atop、lighter/copy/xor/multiply）
 - [x] 步 5/8：PNG（loadPNG 解码 inflate+5 种滤波重建+调色板/tRNS；savePNG/toPNG 编码 deflate+CRC32；系统 zlib）
-- [ ] 步 6/8：事件系统（Window setKeyCallback 等 GLFW 回调注册，保留轮询 API 向后兼容；napi 不接）
+- [x] 步 6/8：事件系统（Window setKeyCallback 等 8 类 GLFW 回调注册，保留轮询 API 向后兼容；napi 不接）
 - [ ] 步 7/8：napi 透传新 API（ellipse/roundRect/渐变/clip/合成/PNG）+ smoke 测试
 - [ ] 步 8/8：全量回归（01-15 示例 + napi npm test）+ merge main + 发布闭环后再打 tag
 
@@ -573,3 +573,10 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 排障 5：屏幕校验点（文本字形空洞/渐变蓝通道阈值误判）→ 文本改区域统计（与 14_skia 同法）、渐变点阈值按实测 (208,86,80) 修正
 - **验证通过（本机）**：examples/19_png.cpp 8 项全 OK——手工构造 5 滤波行 RGBA、调色板+tRNS、灰度+tRNS、真彩+tRNS 解码逐字节比对；画布绘制→读回→toPNG→savePNG→loadPNG 800x600 逐像素一致；屏幕渐变/圆/文本区域校验；exit=0；15/16/17/18/12 回归全 OK
 - 待验证：napi 透传（步 7 统一做，届时 napi 构建加 zlib）；Skia 侧编译验证（CI 14_skia 链路）
+
+### 步 6/8：事件系统（修改后记录，2026-08-20）
+- 实现：Window 8 类 GLFW 回调注册（setKeyCallback/setCharCallback/setMouseButtonCallback/setCursorPosCallback/setScrollCallback/setCursorEnterCallback/setFramebufferSizeCallback/setCloseCallback），typedef std::function 签名与 GLFW 一致；构造时 glfwSetWindowUserPointer 存 this + 注册 8 个静态分发钩子（windowOf 取回实例 → 判空分发 std::function）；轮询 API（keyPressed/mousePressed/mousePosition）保留不动；头文件补 <functional>
+- 排障 1：glfwSetCloseCallback 为 GLFW 2.x 名字，3.3 已移除 → 改 glfwSetWindowCloseCallback（GLFWwindowclosefun）
+- 排障 2：示例 "字符 '" + char 的 const char*+char 指针运算编译错 → std::string 拼接
+- **验证通过（本机）**：examples/20_events.cpp 10 项全 OK——8 类回调分发（glfwSetXxxCallback(handle,nullptr) 抓取钩子 + 合成参数直调，验证用户指针→Window→std::function 链路）+ 真实 resize 事件（glfwSetWindowSize→pollEvents→framebuffer 回调触发）+ 缩放后 FBO 按新尺寸重建并正确渲染（800x600 红 / 640x480 蓝中心像素校验）；exit=0；15/16/17/18/19/12 回归全 OK
+- 待验证：napi 透传（步 7 统一做，事件系统不接 napi）；Skia 侧编译验证（CI 14_skia 链路）
