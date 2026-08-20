@@ -525,4 +525,5 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 修改前：主库无 ellipse/roundRect（grep 零命中）；arc 已实现段细分（hpp:1611-1648，≤kPi/16 每段、最少 8 段）；rect 为 moveTo+3 lineTo+closePath（hpp:1651-1657）
 - 修改后（工作区未提交）：主库新增 ellipse(cx,cy,rx,ry,rotation,a0,a1,ccw)（参数方程折线细分，rotation 支持，负半径抛异常，零半径退化直线）；roundRect 单半径 + 四角数组两重载（负半径钳 0、过大钳 min(w,h)/2、零尺寸不产生路径、按 Canvas 标准 4 段 arc 组合）；Skia 封装同步（ellipse 参数方程 + roundRect SkRRect setRectXY/setRectRadii）
 - 渲染管线零改动（PathSeg 命令序列，flattenPath 通用）
-- 待验证：本机编译 + 示例 15（新建）+ napi 透传（步 7 统一做）
+- **验证通过（本机）**：新建 examples/15_roundrect.cpp（单/四角半径 roundRect + 半径钳制 + 旋转椭圆 + 椭圆弧 stroke + roundRect stroke），build.ps1 编译运行 -t 10 项像素校验全 OK，exit=0
+- 待验证：napi 透传（步 7 统一做）；Skia 侧编译验证（CI 14_skia 链路）
