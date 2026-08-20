@@ -122,6 +122,12 @@ if(WBWOPENGAL_API_SKIA)
             message(FATAL_ERROR "WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: ${WBWOPENGAL_API_SKIA_DIR}")
         endif()
         target_link_libraries(14_skia PRIVATE ${WBWOPENGAL_SKIA_LIBS})
+        if(WIN32)
+            # GN 产物以 -MT 静态 CRT 编译（skia-ci GN args extra_cflags=["-MT"]），
+            # ClangCL 目标默认 /MD 会触发 lld-link /failifmismatch RuntimeLibrary mismatch
+            # → 14_skia 对齐为静态 CRT（CMake 3.15+ 属性，ClangCL frontend variant=MSVC 生效）
+            set_target_properties(14_skia PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+        endif()
     else()
         find_package(skia CONFIG REQUIRED)
         target_link_libraries(14_skia PRIVATE skia)

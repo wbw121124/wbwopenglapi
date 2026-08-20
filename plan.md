@@ -211,6 +211,38 @@ wbwopenglapi_skia.hpp 原按 aseprite-m102 API 编写，chrome/m152 有大量 AP
   WBWOPENGAL_API_SKIA 分支内，build.ps1 常规示例（09-12 等）零影响
 - 待 CI 确认：编译/链接/运行/打包全链路（push 触发 skia-ci push main）
 
+### 本次修改 2（修改前记录，commit 前）——RuntimeLibrary mismatch（CI run 32323450507 失败）
+**根因（run 32323450507 17_Build 步骤日志）**：
+```
+lld-link : error : /failifmismatch: mismatch detected for 'RuntimeLibrary':
+  >>> 14_skia.dir\Release\14_skia.obj has value MD_DynamicRelease
+  >>> skia.lib(core.SkSurface.obj) has value MT_StaticRelease
+```
+- GN 构建 skia 的 args 含 extra_cflags=["-MT"]（skia-ci.yml:88）→ skia.lib 为静态 CRT
+- 14_skia 目标（ClangCL）默认 /MD 动态 CRT → lld-link /failifmismatch 拒绝
+- 编译阶段已通过（仅 fopen 弃用警告）；Configure 干净；失败点=链接期
+
+**方案**：CMakeLists.txt Skia 段（WBWOPENGAL_API_SKIA_DIR 分支）为 14_skia 目标设置
+`MSVC_RUNTIME_LIBRARY=MultiThreaded`（CMake 3.15+ 属性，ClangCL frontend variant=MSVC 生效，
+CMake 3.16 满足）。选 CMakeLists 而非 workflow：skia-ci.yml 与 debug.yml 两处直连
+SKIA_DIR 编译（debug.yml:58-60 同链路）共同受益，一处修复两处生效；且语义上
+"SKIA_DIR 直连 GN /MT 产物 → 目标必须 /MT" 属构建配置正解。
+- vcpkg 方案分支（find_package(skia CONFIG)）不受影响（不改其链接接口）
+- 非 Windows 分支不受影响（仅 WIN32 下设置）
+
+**预期验证**：ClangCL 编译 14_skia → 链接通过（RuntimeLibrary 对齐 /MT）→ 运行
+（icudtl.dat 已拷）→ 文本像素校验 → exit=0 → 打包 tar.gz
+
+### 本次修改 2（修改后记录）——已实施（commit 待 CI 验证）
+- CMakeLists.txt:124-130：WBWOPENGAL_API_SKIA_DIR 分支内 target_link_libraries 后新增
+  `if(WIN32) set_target_properties(14_skia PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")`
+- 影响面：仅 SKIA_DIR 直连 + Windows；vcpkg 分支（find_package(skia CONFIG)）未动；
+  Linux/macOS（*.a）未动；常规示例（非 SKIA 分支）零影响
+- 静态检查：CMake 3.15+ 属性，CMakeLists 声明 min 3.16 ✓；ClangCL frontend variant=MSVC
+  （CI 日志 "Clang 22.1.3 with MSVC-like command-line"）→ 属性生效生成 /MT ✓
+- debug.yml 同链路（SKIA_DIR 直连编译）自动受益，无需单独改
+- 待 CI 确认：链接通过后运行/打包链路（push 触发 skia-ci）
+
 ## 排障记录
 - YAML：`run: & .\scripts\...` 开头 & 是锚点语法必须加引号；name 值内中文冒号
   须整体加引号（列间以空格分隔的 "include+libs" 写法规避）
