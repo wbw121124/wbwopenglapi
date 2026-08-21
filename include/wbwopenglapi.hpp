@@ -2595,7 +2595,7 @@ public:
         multiplyCurrent4(m);
     }
 
-    // CSS perspective(d)：透视投影矩阵（列主序第 3 列 m[14]=-1/d）。
+    // CSS perspective(d)：透视投影矩阵（W 行 z 系数 = -1/d，列主序 m[11]）。
     // d 必须为正（观察者到 z=0 平面的距离），否则抛 std::invalid_argument。
     void perspective(double d) {
         if (!(d > 0.0)) {
@@ -2603,8 +2603,8 @@ public:
         }
         const float m[16] = {1.0f, 0.0f, 0.0f, 0.0f,
                              0.0f, 1.0f, 0.0f, 0.0f,
-                             0.0f, 0.0f, 1.0f, 0.0f,
-                             0.0f, 0.0f, static_cast<float>(-1.0 / d), 1.0f};
+                             0.0f, 0.0f, 1.0f, static_cast<float>(-1.0 / d),
+                             0.0f, 0.0f, 0.0f, 1.0f};
         multiplyCurrent4(m);
     }
 
@@ -2693,13 +2693,32 @@ public:
             {static_cast<float>(x), static_cast<float>(y + dh), 0.0f, 1.0f},
         };
         // 像素坐标 -> NDC（proj_ * current_）
-        float m[9];
-        matMul(proj_, current_, m);
         TexV ndc[6];
-        for (int i = 0; i < 6; ++i) {
-            ndc[i] = src[i];
-            ndc[i].px = m[0] * src[i].px + m[3] * src[i].py + m[6];
-            ndc[i].py = m[1] * src[i].px + m[4] * src[i].py + m[7];
+        if (has3D_) {
+            // 3D 过渡路径：四角经 eff4 投影 + w 除法（任一角越过相机平面
+            // w<ε 则整图跳过）。uv 为屏幕空间插值，强透视下有歪斜——
+            // 步 4 换 (u/w,v/w,q) 透视校正采样。
+            float m4[16];
+            matMul4(proj4_, cur4_, m4);
+            for (int i = 0; i < 6; ++i) {
+                const float vx = src[i].px;
+                const float vy = src[i].py;
+                const float w = m4[3] * vx + m4[7] * vy + m4[15];
+                if (w < 1e-4f) {
+                    return;
+                }
+                ndc[i] = src[i];
+                ndc[i].px = (m4[0] * vx + m4[4] * vy + m4[12]) / w;
+                ndc[i].py = (m4[1] * vx + m4[5] * vy + m4[13]) / w;
+            }
+        } else {
+            float m[9];
+            matMul(proj_, current_, m);
+            for (int i = 0; i < 6; ++i) {
+                ndc[i] = src[i];
+                ndc[i].px = m[0] * src[i].px + m[3] * src[i].py + m[6];
+                ndc[i].py = m[1] * src[i].px + m[4] * src[i].py + m[7];
+            }
         }
         ensureFrame(); // 抗锯齿模式：首次绘制切换离屏 FBO
         applyClipGuard();
@@ -2798,7 +2817,7 @@ private:
         out4[10] = 1.0f;
         out4[12] = m3[6];
         out4[13] = m3[7];
-        out4[14] = m3[8];
+        out4[14] = 0.0f;
         out4[15] = 1.0f;
     }
 
@@ -3029,8 +3048,8 @@ void main() {
         proj4_[1] = 0.0f;
         proj4_[2] = 0.0f;
         proj4_[3] = 0.0f;
-        proj4_[4] = -2.0f / fh;
-        proj4_[5] = 0.0f;
+        proj4_[4] = 0.0f;
+        proj4_[5] = -2.0f / fh;
         proj4_[6] = 0.0f;
         proj4_[7] = 0.0f;
         proj4_[8] = 0.0f;
@@ -3170,6 +3189,105 @@ void main() {
         }
     }
 
+    // 3D 通道三角形绘制（has3D_ 时由 drawSolid 路由进入）。
+    // 顶点按 (x,y,0,1) 经 eff4 = proj4_*cur4_ 变换到齐次裁剪空间，逐三角形
+    // Sutherland–Hodgman 裁剪（w>=ε 近平面 + |x|,|y|<=K·w 视锥护栏，防 w→0
+    // 时 NDC 坐标爆炸），w 除法后复用既有 solid 管线（坚持 CPU 预变换哲学，
+    // 属性恒为 NDC 小数值，规避驱动大数值 attribute 怪癖）。
+    // 渐变：3D 下用户坐标恢复需单应逆矩阵（步 3 接入 currentUserInv），
+    // 本步过渡为取首 stop 颜色纯色绘制。
+    void drawSolid3D(const Color& c, const detail::Vec2* verts, size_t count,
+                     const Gradient* grad, bool clipGuard) {
+        ensureFrame();
+        if (clipGuard) {
+            applyClipGuard();
+        }
+        applyComposite();
+        Color color = c;
+        if (grad && !grad->stops.empty()) {
+            color = grad->stops.front().second; // 过渡：首 stop 纯色（步 3 替换）
+        }
+        float m[16];
+        matMul4(proj4_, cur4_, m);
+        struct ClipV {
+            float x, y, z, w;
+        };
+        std::vector<ClipV> cv(count);
+        for (size_t i = 0; i < count; ++i) {
+            const float x = verts[i].x;
+            const float y = verts[i].y;
+            cv[i].x = m[0] * x + m[4] * y + m[12];
+            cv[i].y = m[1] * x + m[5] * y + m[13];
+            cv[i].z = m[2] * x + m[6] * y + m[14];
+            cv[i].w = m[3] * x + m[7] * y + m[15];
+        }
+        static constexpr float kNearEps = 1e-4f;
+        static constexpr float kFrustumK = 8.0f;
+        ClipV poly[16];
+        ClipV tmp[16];
+        std::vector<detail::Vec2> ndc;
+        ndc.reserve(count);
+        for (size_t t = 0; t + 2 < count; t += 3) {
+            int n = 3;
+            poly[0] = cv[t];
+            poly[1] = cv[t + 1];
+            poly[2] = cv[t + 2];
+            for (int p = 0; p < 5 && n > 0; ++p) {
+                int mn = 0;
+                for (int i = 0; i < n; ++i) {
+                    const ClipV& a = poly[i];
+                    const ClipV& b = poly[(i + 1) % n];
+                    float da, db;
+                    switch (p) {
+                        case 0: da = a.w - kNearEps; db = b.w - kNearEps; break;
+                        case 1: da = kFrustumK * a.w - a.x; db = kFrustumK * b.w - b.x; break;
+                        case 2: da = a.x + kFrustumK * a.w; db = b.x + kFrustumK * b.w; break;
+                        case 3: da = kFrustumK * a.w - a.y; db = kFrustumK * b.w - b.y; break;
+                        default: da = a.y + kFrustumK * a.w; db = b.y + kFrustumK * b.w; break;
+                    }
+                    const bool inA = da >= 0.0f;
+                    const bool inB = db >= 0.0f;
+                    if (inA) {
+                        tmp[mn++] = a;
+                    }
+                    if (inA != inB) {
+                        const float s = da / (da - db);
+                        ClipV v;
+                        v.x = a.x + s * (b.x - a.x);
+                        v.y = a.y + s * (b.y - a.y);
+                        v.z = a.z + s * (b.z - a.z);
+                        v.w = a.w + s * (b.w - a.w);
+                        tmp[mn++] = v;
+                    }
+                }
+                n = mn;
+                for (int i = 0; i < n; ++i) {
+                    poly[i] = tmp[i];
+                }
+            }
+            for (int i = 1; i + 1 < n; ++i) { // 扇形三角化 + w 除法 -> NDC
+                const ClipV tri[3] = {poly[0], poly[i], poly[i + 1]};
+                for (const ClipV& v : tri) {
+                    detail::Vec2 o;
+                    o.x = v.x / v.w;
+                    o.y = v.y / v.w;
+                    ndc.push_back(o);
+                }
+            }
+        }
+        if (ndc.empty()) {
+            return;
+        }
+        program_->use();
+        glUniform4f(program_->uniform("u_color"), color.r, color.g, color.b,
+                    color.a * static_cast<float>(globalAlpha_));
+        vao_->bind();
+        vbo_->upload(ndc.data(),
+                     static_cast<GLsizeiptr>(ndc.size() * sizeof(detail::Vec2)));
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(ndc.size()));
+        glBindVertexArray(0);
+    }
+
     // 以指定颜色绘制三角形列表（含 globalAlpha）。
     // 顶点在 CPU 变换为 NDC 后上传（见 kSolidVS 注释：驱动 attribute/矩阵限制）。
     // mat 为 nullptr 时使用当前 proj_（像素坐标 -> NDC），
@@ -3181,6 +3299,11 @@ void main() {
     void drawSolid(const Color& c, const detail::Vec2* verts, size_t count,
                    const float* mat = nullptr, const Gradient* grad = nullptr,
                    const float* invM = nullptr, bool clipGuard = true) {
+        // 3D 模式（显式传 mat 的 NDC 直写调用除外，如 stencil 全屏四边形）
+        if (has3D_ && !mat) {
+            drawSolid3D(c, verts, count, grad, clipGuard);
+            return;
+        }
         ensureFrame(); // 抗锯齿模式：首次绘制切换离屏 FBO（本帧内只做一次）
         if (clipGuard) {
             applyClipGuard();

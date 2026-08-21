@@ -760,3 +760,50 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - CI 观察：push main 已触发 Skia CI（run 于 9d7773f，in_progress）；
   前两轮同链路（11c4cb5 / 824c478）Skia CI + Debug e2e 均 success
 - 步 8/8 剩余：Skia CI / Debug e2e 转绿确认后勾结；打 tag 待发布闭环
+
+### 步 2/8：drawSolid 3D 通道（修改前记录，2026-08-21）
+- 方案：
+  - drawSolid 头部路由：`has3D_ && !mat` 时转 drawSolid3D（fill/fillRect/
+    strokePixels 三角带自动生效）；渐变过渡为首 stop 纯色（步 3 换单应逆）
+  - drawSolid3D：eff4 = proj4_*cur4_（matMul4 列主序通用积）→ 顶点 (x,y,0,1)
+    变换为齐次裁剪坐标 → 逐三角形 Sutherland–Hodgman 5 平面裁剪
+    （w>=1e-4 近平面 + |x|,|y|<=8w 护栏防 w→0 坐标爆炸）→ 扇形三角化 →
+    w 除法得 NDC → 复用既有 Vec2 VAO/solid 管线
+  - drawImage 3D 过渡路径：四角投影 + w 除法（任一角 w<1e-4 整图跳过；
+    透视校正采样留步 4）
+  - perspective() 矩阵修正：CSS W 行 z 系数 -1/d 应在列主序 m[11]
+    （步 1 笔误写在 m[14]，本步修复）
+  - 新增 examples/21_transform3d.cpp：A translate3d(z=0) 与 2D translate
+    等价 / B rotateZ 与 2D rotate 等价 / C rotateX(0.4) 梯形 projRX 解析
+    校验（质心+四边内外 9 点）/ D painter's order（远蓝先画近红后画重叠
+    红胜）/ E 整体越过相机平面全顶点丢弃 / F strokeRect 3D 描边 /
+    G resetTransform 回落 2D / perspective(-5) 抛异常，共 21 项检查
+- 验证计划：21_transform3d -t 全 OK → freetype 后端既有 18 示例回归全绿
+
+### 步 2/8：drawSolid 3D 通道排障（2026-08-21）
+- 症状：21_transform3d -t 所有 3D 路径绘制全为背景色（A-blue/B-green/C/D/F
+  FAIL；2D 路径 A-red/B-purple/G OK；E 相机后丢弃 OK）
+- 排障过程：
+  1. 首版调试 fprintf 用 %zu → MinGW printf 不支持（plan.md 排障 4 已知坑，
+     参数错位输出不可信，且 -Wformat-extra-args 告警佐证）→ 改 %u+static_cast
+  2. 可信输出显示 ndc0.y 恒为 1.000000、ndc0.x 与期望差随顶点变化 →
+     加打 cur4_/proj4_ 全矩阵转储：cur4_ col3=(200,80,1,1)——z 平移被注入 1
+  3. **根因 1**：updateViewport 的 proj4_ 打包错位——mat4 列主序步长为 4，
+     `-2/fh` 误写到 proj4_[4]（mat3 扁平布局位置），应为 proj4_[5]。
+     后果：Y 缩放为零 + X 行混入 y 剪切。精确验证：X_clip =
+     0.0025·200 − 0.003333·80 − 1 = −0.7667、Y_clip = w = 1.0，
+     与观测 ndc0=(−0.766667, 1.000000) 完全吻合
+  4. **根因 2**：mat3ToMat4 的 `out4[14] = m3[8]`——m3[8] 是 mat3 齐次权重位
+     （恒 1），非平移分量；每次 ensure3D 折叠都向 cur4_ 注入 z 平移 1
+     （无 perspective 时位置不受影响，有 perspective 时会偏移 w，必须修）
+- 修复：proj4_[4]=0 / proj4_[5]=-2/fh；out4[14]=0；拆除全部调试 fprintf
+- 修复后：21_transform3d -t **18/21 OK**（A×2/B×4/C 质心+四边内侧/D 仅蓝区域/
+  E/G/perspective(-5) 全过）
+- 待查（3 项 FAIL）：
+  - C 上边/下边 外侧：梯形实际渲染比 projRX 解析预测略高/略低——疑似测试
+    helper 的 rotateX z 分量符号与库实现 CSS 约定不一致（库按 CSS y 向下：
+    上缘 y<0 → z'=−s·y>0 朝观察者；helper 写成 z1=+s·y），待核对库内
+    rotateX 矩阵元素后修 helper
+  - D 重叠中心红胜：中心像素蓝未被子绘制红覆盖——待查绘制顺序/混合
+  - F 3D 描边上边：strokeRect 条带未出现在解析预测位置——待查 strokePixels
+    3D 投影路径
