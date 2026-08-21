@@ -648,3 +648,15 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 通过标准：全部 exit=0、stderr 无异常输出；随后 merge feature/canvas2d-complete
   → main 并 push（merge 后 push main 触发 skia-ci/debug.yml 观察项）
 - 打 tag 仍按原计划延后：发布闭环（release/release-skia 全绿）后再打 tag
+
+### 步 8/8：全量回归（修改后记录，2026-08-21）——全部通过
+- freetype 后端（auto，PNG(zlib)=1）：18 示例（01-13+15-20）编译全过，
+  -t 全部 exit=0。排障：08_demo 首轮批量运行 exit=1 一次性抖动——单独重跑
+  5 次 + 全批重跑均 OK（不可复现，判定为首启 shader/驱动预热类偶发，非代码缺陷）
+- gdi 后端：18 示例重编译 + -t 全绿
+- dwrite 后端：18 示例重编译 + -t 全绿（含 13_dwrite_text）
+- freetype+HarfBuzz：10_ligature -t exit=0（连体链路）
+- napi：npm run build 全绿 → smoke OK（含 gradient/roundRect/clip/composite/
+  toPNG 链路）→ npm test **15/15 全绿**
+- 附注：build/ 下残留历史调试产物 17_diag.exe / 99_glinfo.exe（examples 已无对应
+  源文件），不影响回归结论；后续可清理
