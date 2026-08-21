@@ -635,6 +635,75 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
   source-in 合成、PNG 编解码往返含 Buffer 与文件落盘）
 - commit ba7a045（修改前记录 + 实现）；本条为修改后记录
 
+# 三维变换 + Doxygen 注释标准化（feature/transform3d-docs）
+
+## 目标
+- 主库新增 CSS 风格三维变换：`translate3d / rotateX / rotateY / rotateZ / scale3d /
+  perspective(d)`，与既有 2D 变换按调用序统一组合（单一矩阵语义）
+- 真 3D 渐变（用户确认）：平面几何经 mat4 投影 = 2D 单应（homography），
+  CPU 端构建 3×3 单应逆传给既有 kGradFS（其已做 `p3.xy/p3.z` 齐次除法，
+  着色器零改动）；H 奇异时回退首 stop 纯色
+- drawImage 透视校正纹理采样（u/w trick，第二套 tex 管线）（用户确认本轮做）
+- Skia 封装不加 3D（SkMatrix 仅 2D 仿射），README 标注 GL 库专属（用户确认跳过）
+- 全部注释转 Doxygen 标准（Doxyfile 已有；`npm run docs` 走 node_modules 内置
+  doxygen 1.9.1，警告日志 docs/doxygen-warnings.log 须零告警）
+
+## 架构决策
+- **惰性升级**：`current_(mat3)` 与全部仿射代码路径原样保留——既有像素级回归
+  bit 级零风险的保证。首次调用 3D 方法时把 current_ 折叠进 `cur4_[16]` 并置
+  `has3D_=true`，此后 2D/3D 方法统一右乘组合进 cur4_（CSS 调用序跨 2D/3D 正确）；
+  resetTransform() 回落 mat3 恒等
+- proj4_[16] 与 proj_(mat3) 同步构建（像素->NDC，z 行 0、w=1）
+- drawSolid 3D 分支：顶点按 (x,y,0,1) 经 eff4=proj4*cur4_ -> 齐次空间逐三角形
+  Sutherland–Hodgman 裁剪（w>=ε + |x|,|y|<=K·w 护栏防 w→0 坐标爆炸）-> w 除法 ->
+  复用既有 Vec2-NDC VAO/solid/grad 着色器（坚持 CPU 预变换哲学，规避 hpp:2693
+  驱动大数值 attribute 怪癖）
+- 渐变：统一助手 currentUserInv(out[9])——非 3D 走原 mat3Inverse(proj_*current_)
+  路径（bit 级不变），3D 走单应矩阵（eff4 第 0/1/3 行）求逆（mat3Inverse 本就
+  是通用伴随法，直接复用）
+- strokePixels 3D：折线端点投影到画布空间再走 DDA/Bresenham/Wu（端点 w<ε 丢弃段，
+  文档标注近似）
+- painter's order 语义：无深度测试，绘制顺序即遮挡顺序（文档明示）
+- 文本/clip(stencil 屏幕空间)/composite/globalAlpha 经既有管线自动兼容
+
+## 步骤（每步：更新本文 → commit → push）
+- [ ] 步 1/8：核心 mat4 惰性升级 + 6 个新 API + save/restore/resetTransform 集成
+      （无渲染行为变化）→ 验证：全示例 freetype 后端回归全绿
+- [ ] 步 2/8：drawSolid 3D 通道（齐次裁剪 + w 除法）；fillRect/fill/stroke 自动生效
+      → 新增 examples/21_transform3d：rotateZ 与 2D rotate 等价性 + rotateX 梯形解析校验
+- [ ] 步 3/8：真 3D 渐变（currentUserInv 统一助手 + 退化回退首 stop）
+      → 21 增 rotateY 平面线性/径向渐变采样校验
+- [ ] 步 4/8：drawImage 透视校正（(u/w,v/w,q) varying + FS 除 q；四边形齐次裁剪）
+      → 21 增旋转平面贴图中心像素校验
+- [ ] 步 5/8：strokePixels 3D 投影 + 旋转平面文本区域统计；README 特性/API 一览更新
+- [ ] 步 6/8：napi 透传 6 方法 + smoke/test 用例 → 全量回归（三后端×19 示例 +
+      HarfBuzz + napi）
+- [ ] 步 7/8：npm install（doxygen 二进制）+ 主头文件注释转 Doxygen（分节：
+      detail 工具/GL 管线/FontFace/Canvas 公共 API）→ 编译零警告 + 示例抽测
+- [ ] 步 8/8：skia 头转换 + npm run docs 零告警验证 + 最终全量回归 + merge main
+
+## 排障记录
+（按步追加）
+
+### 步 1/8：核心 mat4 惰性升级（修改前记录，2026-08-21）
+- 修改前：current_[9]/proj_[9] 列主序 mat3（hpp:3548-3553）；translate/rotate/
+  resetTransform 直接构造 mat3 右乘（hpp:2503-2523）；StackEntry.m[9]
+  （hpp:2637）；multiplyCurrent 右乘（hpp:2683）；proj_ 在 framebuffer 尺寸处
+  构建（hpp:2867-2885）；save/restore memcpy current_
+- 方案：
+  - 成员新增 `float cur4_[16]`、`bool has3D_=false`、`float proj4_[16]`
+  - 新 API：translate3d(x,y,z)/rotateX/Y/Z(rad)/scale3d(x,y,z)/perspective(d)
+    （d>0 否则抛 invalid_argument；CSS perspective 矩阵 m[14]=-1/d 列主序）
+  - rotateZ 即 3D 通道的 Z 旋转（与 2D rotate 同向：y 向下顺时针）
+  - ensure3D()：首次 3D 调用把 current_ 嵌入 cur4_（第 0/1 行列 + 平移第 12/13 列，
+    z 行 0、w=1）并置 has3D_；此后 translate/rotate 等 2D 方法也走 mat4 组合
+  - multiplyCurrent 分支：!has3D_ 原 mat3 右乘不动；has3D_ 把 mat3 操作嵌入 mat4 右乘
+  - resetTransform：两套矩阵归位 + has3D_=false
+  - StackEntry 增 m4[16]+has3D；save 双存、restore 双恢复
+  - proj4_ 与 proj_ 同点同步构建（beginFrame/framebuffer 变更处）
+  - 本步不接渲染路径（drawSolid 等仍走 mat3），故零行为变化
+- 验证计划：build.ps1 freetype 全量编译 + 全部示例 -t 全绿
+
 ### 步 8/8：全量回归 + merge main（修改前记录，commit 前，2026-08-21）
 - 范围修正：原条目写「01-15 示例」，实际示例已至 20；且 01/08 实际均有 -t 模式
   （01_hello.cpp:9 / 08_demo.cpp:9，README「01/08 无 -t」表述过时，回归以实测为准）
