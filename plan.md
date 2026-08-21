@@ -660,3 +660,11 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
   toPNG 链路）→ npm test **15/15 全绿**
 - 附注：build/ 下残留历史调试产物 17_diag.exe / 99_glinfo.exe（examples 已无对应
   源文件），不影响回归结论；后续可清理
+
+### 步 8/8：merge main（修改前记录，2026-08-21）
+- 前置核查：main 自分支切出后零新提交（`git log feature..main` 为空）→
+  fast-forward 合并，无冲突风险；feature 领先 12 提交（9 功能 + 3 记录）
+- 操作：checkout main → merge --ff-only feature/canvas2d-complete → push
+- 合并后观察项：push main 触发 skia-ci.yml（GN+LLVM 全链路）→ 成功后 workflow_run
+  触发 debug.yml（发布包 e2e）；release/release-skia 仅 tag/dispatch 触发，
+  发布闭环验证留待打 tag 时进行
