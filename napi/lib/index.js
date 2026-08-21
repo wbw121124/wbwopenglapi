@@ -42,10 +42,13 @@ function loadBMP(filePath) {
   return native.loadBMP(filePath);
 }
 
-const api = { createCanvas, loadBMP };
+// 注意：保持 cjs-module-lexer 可静态识别的导出形式（ESM 具名导入依赖）：
+// 对象字面量赋值 + 属性赋值，勿改为运行时拼装对象
+module.exports = { createCanvas, loadBMP };
 // PNG 导出仅在构建期探测到系统 zlib 时存在（WBWOPENGAL_API_PNG）
-for (const name of ['loadPNG', 'savePNG']) {
-  if (typeof native[name] === 'function') api[name] = native[name];
+if (typeof native.loadPNG === 'function') {
+  module.exports.loadPNG = native.loadPNG;
 }
-
-module.exports = api;
+if (typeof native.savePNG === 'function') {
+  module.exports.savePNG = native.savePNG;
+}

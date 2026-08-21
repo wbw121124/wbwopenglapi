@@ -515,7 +515,7 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - [x] 步 4/8：globalCompositeOperation 12 模式（source-over/source-in/out/atop、destination-over/in/out/atop、lighter/copy/xor/multiply）
 - [x] 步 5/8：PNG（loadPNG 解码 inflate+5 种滤波重建+调色板/tRNS；savePNG/toPNG 编码 deflate+CRC32；系统 zlib）
 - [x] 步 6/8：事件系统（Window setKeyCallback 等 8 类 GLFW 回调注册，保留轮询 API 向后兼容；napi 不接）
-- [ ] 步 7/8：napi 透传新 API（ellipse/roundRect/渐变/clip/合成/PNG）+ smoke 测试
+- [x] 步 7/8：napi 透传新 API（ellipse/roundRect/渐变/clip/合成/PNG）+ smoke 测试
 - [ ] 步 8/8：全量回归（01-15 示例 + napi npm test）+ merge main + 发布闭环后再打 tag
 
 ## 排障记录
@@ -606,3 +606,31 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 验证计划：npm run build → 导出存在性冒烟 → basic.test.mjs 新增 5 用例
   （ellipse/roundRect 含半径数组、线性+径向渐变像素、clip+restore、
   source-in 合成、PNG 编解码往返含文件落盘）→ smoke 扩展 → npm test 全绿
+
+### 步 7/8：napi 透传新 API（修改后记录，2026-08-21）
+- 实现（与修改前方案一致）：GradientWrap（GradientHandle：addColorStop，friend
+  复用 RendererWrap 解析工具，EnvRefs 第三槽位）；fillStyle/strokeStyle
+  InstanceOf 判定渐变句柄；roundRect 数字/1..4 元素数组按 Canvas 规范映射；
+  ellipse 七参直传；clip/globalCompositeOperation 直传；PNG 四导出
+  （canvas.toPNG / loadPNG(路径|Buffer) / savePNG(ImageHandle,path) /
+  ImageHandle.toPNG + rgba 访问器）；CMake zlib 探测（WIN32
+  check_cxx_source_compiles -lz 同 build.ps1 手法，其余 find_package(ZLIB QUIET)，
+  本机探测通过 PNG(zlib)=1）
+- 排障 1：GradientWrap::AddColorStop 调用 RendererWrap 私有静态解析工具报
+  not declared in this scope → RendererWrap 增 `friend class GradientWrap`
+- 排障 2：lib/index.js 改为运行时拼装导出对象（const api = {...};
+  module.exports = api）后 ESM 具名导入报 "Named export 'createCanvas' not
+  found"——cjs-module-lexer 无法静态识别该形式 → 改回词法可检测形式
+  （module.exports = { createCanvas, loadBMP } + module.exports.loadPNG = ...
+  属性赋值），并加注释防止回归
+- 排障 3（测试预期修正，非绑定缺陷）：① 椭圆短轴校验点 (16,7) 在边界外 1px
+  （ry=8 顶点 y=8）→ 内移 (16,11)/外移 (16,6)；② source-in 校验误用 Web 语义
+  ——GL 单遍混合片段仅存在于 src 覆盖处，src 未覆盖处 dst 保持原样（与示例 18
+  按混合方程 C=Cs*Fs+Cd*Fd 验证的语义一致）→ 按 src∩dst=蓝、dst 空=透明、
+  src 外=dst 保持 三点修正
+- **验证通过（本机）**：npm run build 全绿（zlib 探测 STATUS PNG(zlib): 1）；
+  导出冒烟 loadPNG/savePNG/toPNG 等 7 新方法全部 function；npm run smoke OK
+  （新增渐变/roundRect/clip/composite/toPNG 链路）；npm test **15 项全绿**
+  （原 10 + 新 5：ellipse/roundRect 含半径数组、线性+径向渐变、clip+restore、
+  source-in 合成、PNG 编解码往返含 Buffer 与文件落盘）
+- commit ba7a045（修改前记录 + 实现）；本条为修改后记录

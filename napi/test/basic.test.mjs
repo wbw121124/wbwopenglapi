@@ -143,7 +143,8 @@ test('ellipse 与 roundRect（含半径数组）', () => {
   const px = c.readPixels(0, 0, 64, 64);
   const at = (x, y) => [...px.subarray((y * 64 + x) * 4, (y * 64 + x) * 4 + 4)];
   assert.deepEqual(at(16, 16), [255, 0, 0, 255]);     // 椭圆中心
-  assert.deepEqual(at(16, 7), [255, 0, 0, 255]);      // 椭圆短轴内 (ry=8)
+  assert.deepEqual(at(16, 11), [255, 0, 0, 255]);     // 椭圆短轴内 (ry=8)
+  assert.deepEqual(at(16, 6), [255, 255, 255, 255]);  // 椭圆外（短轴顶 y=8）
   assert.deepEqual(at(40, 40), [0, 0, 255, 255]);     // 圆角矩形内部
   assert.deepEqual(at(37, 37), [255, 255, 255, 255]); // 圆角切掉的直角处
   c.close();
@@ -200,12 +201,13 @@ test('globalCompositeOperation source-in', () => {
   c.fillRect(0, 0, 16, 32); // 左半红
   c.globalCompositeOperation('source-in');
   c.fillStyle([0, 0, 255, 255]);
-  c.fillRect(8, 0, 16, 32); // 仅在已有 alpha 内着色 -> 左半变蓝
+  c.fillRect(8, 0, 16, 32); // src 只覆盖 x 8..24（GL 单遍混合：片段仅存在于 src 覆盖处）
   c.resolve();
   const px = c.readPixels(0, 0, 32, 32);
   const at = (x, y) => [...px.subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4)];
-  assert.deepEqual(at(4, 16), [0, 0, 255, 255]); // dst 内：src 替换
-  assert.deepEqual(at(28, 16), [0, 0, 0, 0]);    // dst 外：透明
+  assert.deepEqual(at(12, 16), [0, 0, 255, 255]); // src∩dst：C=Cs*DST_ALPHA -> 蓝
+  assert.deepEqual(at(20, 16), [0, 0, 0, 0]);     // dst 空：C=Cs*0 -> 透明
+  assert.deepEqual(at(4, 16), [255, 0, 0, 255]);  // src 未覆盖处无片段 -> dst 保持
   c.globalCompositeOperation('source-over');     // 未知外的合法值恢复
   c.close();
 });
