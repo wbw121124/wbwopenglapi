@@ -704,6 +704,21 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
   - 本步不接渲染路径（drawSolid 等仍走 mat3），故零行为变化
 - 验证计划：build.ps1 freetype 全量编译 + 全部示例 -t 全绿
 
+### 步 1/8：核心 mat4 惰性升级（修改后记录，2026-08-21）——完成
+- 实现（与修改前方案一致）：
+  - 成员 `cur4_[16]`/`has3D_`/`proj4_[16]`；updateViewport 同步构建 proj4_
+    （z 恒等、w=1，与 proj_ 同点刷新）
+  - 新 API：translate3d/rotateX/rotateY/rotateZ/scale3d/perspective(d)
+    （d<=0 抛 invalid_argument；CSS 约定：rotateX 正角上缘远离、rotateY 正角
+    右缘远离、rotateZ 与 2D rotate 同向、z 轴指向观察者）
+  - ensure3D() 惰性折叠 current_→cur4_；multiplyCurrent4 右乘；
+    translate/rotate 在 has3D_ 时改走 mat4 组合（rotate→rotateZ）
+  - resetTransform 双矩阵归位 + has3D_=false（退出 3D 回 mat3 快速通道）
+  - StackEntry 增 m4[16]+has3D，save 双存/restore 双恢复
+- 本步未接任何渲染路径（drawSolid/drawImage/strokePixels 仍走 mat3），零行为变化
+- **验证通过**：freetype 后端 18 示例编译全过 + -t 全部 exit=0（ALL GREEN）
+- 下一步（步 2）：drawSolid 3D 通道（eff4=proj4*cur4_ 齐次裁剪 + w 除法）
+
 ### 步 8/8：全量回归 + merge main（修改前记录，commit 前，2026-08-21）
 - 范围修正：原条目写「01-15 示例」，实际示例已至 20；且 01/08 实际均有 -t 模式
   （01_hello.cpp:9 / 08_demo.cpp:9，README「01/08 无 -t」表述过时，回归以实测为准）

@@ -2499,8 +2499,19 @@ public:
     }
 
     // ---------------- 变换（Canvas 语义：后调用的变换先应用） ----------------
+    // 2D 方法走 current_(mat3)；一旦涉及 3D（惰性升级，见 ensure3D），全部方法
+    // 统一右乘组合进 cur4_(mat4)，保证跨 2D/3D 的调用序语义与 CSS 一致。
 
     void translate(double dx, double dy) {
+        if (has3D_) {
+            const float t[16] = {1.0f, 0.0f, 0.0f, 0.0f,
+                                 0.0f, 1.0f, 0.0f, 0.0f,
+                                 0.0f, 0.0f, 1.0f, 0.0f,
+                                 static_cast<float>(dx), static_cast<float>(dy),
+                                 0.0f, 1.0f};
+            multiplyCurrent4(t);
+            return;
+        }
         const float t[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
                             static_cast<float>(dx), static_cast<float>(dy), 1.0f};
         multiplyCurrent(t);
@@ -2508,24 +2519,101 @@ public:
 
     // 弧度，顺时针（y 向下坐标系下的标准旋转矩阵）
     void rotate(double rad) {
+        if (has3D_) {
+            rotateZ(rad);
+            return;
+        }
         const float c = static_cast<float>(std::cos(rad));
         const float s = static_cast<float>(std::sin(rad));
         const float r[9] = {c, s, 0.0f, -s, c, 0.0f, 0.0f, 0.0f, 1.0f};
         multiplyCurrent(r);
     }
 
-    // 恢复单位矩阵（仅变换，样式不变）
+    // 恢复单位矩阵（仅变换，样式不变；同时退出 3D 模式回到 mat3 通道）
     void resetTransform() {
         for (int i = 0; i < 9; ++i) {
             current_[i] = 0.0f;
         }
         current_[0] = current_[4] = current_[8] = 1.0f;
+        for (int i = 0; i < 16; ++i) {
+            cur4_[i] = 0.0f;
+        }
+        cur4_[0] = cur4_[5] = cur4_[10] = cur4_[15] = 1.0f;
+        has3D_ = false;
+    }
+
+    // ---------------- 三维变换（CSS 风格；z 轴指向观察者） ----------------
+    // 约定：y 向下屏幕空间 + 右手系标准旋转矩阵——rotateX 正角使屏幕上缘远离
+    // 观察者（同 CSS rotateX）；rotateY 正角使右缘远离（同 CSS rotateY）；
+    // rotateZ 与 2D rotate() 同向。几何位于 z=0 平面，经 translate3d z 或
+    // rotateX/Y 移出后由 perspective(d) 产生透视缩放；z>=d 处 w<=0 被裁剪。
+
+    void translate3d(double dx, double dy, double dz) {
+        const float t[16] = {1.0f, 0.0f, 0.0f, 0.0f,
+                             0.0f, 1.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, 1.0f, 0.0f,
+                             static_cast<float>(dx), static_cast<float>(dy),
+                             static_cast<float>(dz), 1.0f};
+        multiplyCurrent4(t);
+    }
+
+    void rotateX(double rad) {
+        const float c = static_cast<float>(std::cos(rad));
+        const float s = static_cast<float>(std::sin(rad));
+        const float r[16] = {1.0f, 0.0f, 0.0f, 0.0f,
+                             0.0f, c, s, 0.0f,
+                             0.0f, -s, c, 0.0f,
+                             0.0f, 0.0f, 0.0f, 1.0f};
+        multiplyCurrent4(r);
+    }
+
+    void rotateY(double rad) {
+        const float c = static_cast<float>(std::cos(rad));
+        const float s = static_cast<float>(std::sin(rad));
+        const float r[16] = {c, 0.0f, -s, 0.0f,
+                             0.0f, 1.0f, 0.0f, 0.0f,
+                             s, 0.0f, c, 0.0f,
+                             0.0f, 0.0f, 0.0f, 1.0f};
+        multiplyCurrent4(r);
+    }
+
+    void rotateZ(double rad) {
+        const float c = static_cast<float>(std::cos(rad));
+        const float s = static_cast<float>(std::sin(rad));
+        const float r[16] = {c, s, 0.0f, 0.0f,
+                             -s, c, 0.0f, 0.0f,
+                             0.0f, 0.0f, 1.0f, 0.0f,
+                             0.0f, 0.0f, 0.0f, 1.0f};
+        multiplyCurrent4(r);
+    }
+
+    void scale3d(double sx, double sy, double sz) {
+        const float m[16] = {static_cast<float>(sx), 0.0f, 0.0f, 0.0f,
+                             0.0f, static_cast<float>(sy), 0.0f, 0.0f,
+                             0.0f, 0.0f, static_cast<float>(sz), 0.0f,
+                             0.0f, 0.0f, 0.0f, 1.0f};
+        multiplyCurrent4(m);
+    }
+
+    // CSS perspective(d)：透视投影矩阵（列主序第 3 列 m[14]=-1/d）。
+    // d 必须为正（观察者到 z=0 平面的距离），否则抛 std::invalid_argument。
+    void perspective(double d) {
+        if (!(d > 0.0)) {
+            throw std::invalid_argument("wbwopenglapi: perspective(d) 要求 d > 0");
+        }
+        const float m[16] = {1.0f, 0.0f, 0.0f, 0.0f,
+                             0.0f, 1.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, 1.0f, 0.0f,
+                             0.0f, 0.0f, static_cast<float>(-1.0 / d), 1.0f};
+        multiplyCurrent4(m);
     }
 
     // 压栈：变换矩阵 + 全部样式状态
     void save() {
         StackEntry e;
         std::memcpy(e.m, current_, sizeof(current_));
+        std::memcpy(e.m4, cur4_, sizeof(cur4_));
+        e.has3D = has3D_;
         e.fillStyle = fillStyle_;
         e.strokeStyle = strokeStyle_;
         e.fillGrad = fillGrad_;
@@ -2548,6 +2636,8 @@ public:
         const StackEntry e = stack_.back();
         stack_.pop_back();
         std::memcpy(current_, e.m, sizeof(current_));
+        std::memcpy(cur4_, e.m4, sizeof(cur4_));
+        has3D_ = e.has3D;
         fillStyle_ = e.fillStyle;
         strokeStyle_ = e.strokeStyle;
         fillGrad_ = e.fillGrad;
@@ -2635,6 +2725,8 @@ private:
     // save() 保存的完整状态（变换 + 样式）
     struct StackEntry {
         float m[9];
+        float m4[16];      // 3D 变换（has3D=false 时为恒等，不参与渲染）
+        bool has3D = false;
         Color fillStyle;
         Color strokeStyle;
         std::shared_ptr<Gradient> fillGrad;
@@ -2680,11 +2772,60 @@ private:
         return true;
     }
 
+    // 列主序 mat4 乘法: out = a * b
+    static void matMul4(const float* a, const float* b, float* out) {
+        for (int cc = 0; cc < 4; ++cc) {
+            for (int rr = 0; rr < 4; ++rr) {
+                out[cc * 4 + rr] = a[0 * 4 + rr] * b[cc * 4 + 0] +
+                                   a[1 * 4 + rr] * b[cc * 4 + 1] +
+                                   a[2 * 4 + rr] * b[cc * 4 + 2] +
+                                   a[3 * 4 + rr] * b[cc * 4 + 3];
+            }
+        }
+    }
+
+    // 把列主序 mat3 仿射嵌入 mat4（z 行/列取恒等；平移进第 3 列）
+    static void mat3ToMat4(const float* m3, float* out4) {
+        for (int i = 0; i < 16; ++i) {
+            out4[i] = 0.0f;
+        }
+        out4[0] = m3[0];
+        out4[1] = m3[1];
+        out4[2] = m3[2];
+        out4[4] = m3[3];
+        out4[5] = m3[4];
+        out4[6] = m3[5];
+        out4[10] = 1.0f;
+        out4[12] = m3[6];
+        out4[13] = m3[7];
+        out4[14] = m3[8];
+        out4[15] = 1.0f;
+    }
+
     // current_ = current_ * b（右乘：后调用的变换先应用）
     void multiplyCurrent(const float* b) {
         float out[9];
         matMul(current_, b, out);
         std::memcpy(current_, out, sizeof(out));
+    }
+
+    // 惰性升级：首次 3D 变换时把 current_(mat3) 折叠进 cur4_(mat4)。
+    // 此后全部变换（含 2D 方法）统一在 cur4_ 上组合，保证调用序语义一致；
+    // resetTransform()/restore() 可退出 3D 模式回到 mat3 快速通道。
+    void ensure3D() {
+        if (has3D_) {
+            return;
+        }
+        mat3ToMat4(current_, cur4_);
+        has3D_ = true;
+    }
+
+    // cur4_ = cur4_ * b（右乘；自动触发惰性升级）
+    void multiplyCurrent4(const float* b) {
+        ensure3D();
+        float out[16];
+        matMul4(cur4_, b, out);
+        std::memcpy(cur4_, out, sizeof(out));
     }
 
     // solid 通道着色器（阶段 5 增加纹理通道）。
@@ -2883,6 +3024,23 @@ void main() {
         proj_[6] = -1.0f;
         proj_[7] = 1.0f;
         proj_[8] = 1.0f;
+        // proj4_：同一投影的 mat4 形式（z 恒等、w=1；3D 通道用）
+        proj4_[0] = 2.0f / fw;
+        proj4_[1] = 0.0f;
+        proj4_[2] = 0.0f;
+        proj4_[3] = 0.0f;
+        proj4_[4] = -2.0f / fh;
+        proj4_[5] = 0.0f;
+        proj4_[6] = 0.0f;
+        proj4_[7] = 0.0f;
+        proj4_[8] = 0.0f;
+        proj4_[9] = 0.0f;
+        proj4_[10] = 1.0f;
+        proj4_[11] = 0.0f;
+        proj4_[12] = -1.0f;
+        proj4_[13] = 1.0f;
+        proj4_[14] = 1.0f;
+        proj4_[15] = 1.0f;
     }
 
     // 惰性创建渐变通道（复用 solid 的 VAO/VBO，顶点仍是 NDC Vec2）
@@ -3546,11 +3704,18 @@ void strokeOutline(const std::vector<detail::PathSeg>& segs, const Color& c,
     std::unique_ptr<detail::VertexArray> vao_;
     std::unique_ptr<detail::VertexBuffer> vbo_;
     float proj_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    // proj_ 的 mat4 形式（updateViewport 同步构建；3D 通道投影用）
+    float proj4_[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     // 单位矩阵（列主序），用于已处于 NDC 空间的顶点（fill 的全屏四边形）
     static constexpr float kIdentity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 
     // 当前变换（列主序 3x3 仿射，像素坐标空间；初始单位矩阵）
     float current_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+    // 三维变换（惰性升级）：首次调用 3D 方法时 current_ 折叠进 cur4_ 并置
+    // has3D_，此后全部变换统一在 cur4_(mat4 列主序) 上组合
+    float cur4_[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    bool has3D_ = false;
     std::vector<StackEntry> stack_;
 
     // 纹理通道（drawImage）
