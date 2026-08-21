@@ -580,3 +580,29 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 排障 2：示例 "字符 '" + char 的 const char*+char 指针运算编译错 → std::string 拼接
 - **验证通过（本机）**：examples/20_events.cpp 10 项全 OK——8 类回调分发（glfwSetXxxCallback(handle,nullptr) 抓取钩子 + 合成参数直调，验证用户指针→Window→std::function 链路）+ 真实 resize 事件（glfwSetWindowSize→pollEvents→framebuffer 回调触发）+ 缩放后 FBO 按新尺寸重建并正确渲染（800x600 红 / 640x480 蓝中心像素校验）；exit=0；15/16/17/18/19/12 回归全 OK
 - 待验证：napi 透传（步 7 统一做，事件系统不接 napi）；Skia 侧编译验证（CI 14_skia 链路）
+
+### 步 7/8：napi 透传新 API（修改前记录，commit 前，2026-08-21）
+- 修改前：napi 绑定止于基础 API（renderer_wrap 注册表与 lib/index.js methodNames
+  均无 ellipse/roundRect/clip/globalCompositeOperation/createLinearGradient/
+  createRadialGradient/toPNG/loadPNG/savePNG）；WBWOPENGAL_API_PNG 未定义
+  （步 5 决议「napi 不定义宏零依赖」，本步改为**构建期探测 zlib 可用才启用**，
+  不可用则 PNG 导出不注册、其余 API 不受影响）
+- 方案：
+  - 新类 GradientWrap（GradientHandle）：createLinear/RadialGradient 返回实例 +
+    addColorStop(offset, color)；复用 RendererWrap 私有解析工具（Num/ColorArg/
+    RequireArgs，friend 声明）；EnvRefs 增第三槽位 gradient；addon.cc 注册
+  - fillStyle/strokeStyle 扩展接受渐变：先 InstanceOf 判定 GradientHandle 再
+    Unwrap（对非本类包装对象直接 Unwrap 属未定义行为，须先判定），否则走 ColorArg
+  - roundRect 半径按 Canvas 规范：数字或 1..4 元素数组
+    （[a] 四角同 / [a,b] tl=br,tr=bl / [a,b,c] tl,tr=bl,br / [a,b,c,d] 全四角）
+  - ellipse 七参数直传 + ccw 缺省 false；clip() 直传；globalCompositeOperation 字符串直传
+  - PNG：canvas.toPNG()（resolve 后整帧 readRgba top-down → toPNG Buffer）、
+    loadPNG(路径字符串 | Buffer)、savePNG(ImageHandle, path)、ImageHandle 增
+    rgba 访问器（Buffer 拷贝）与 toPNG()；napi/CMakeLists.txt WIN32 用
+    check_cxx_source_compiles 探测 -lz（同 build.ps1 手法）、其余平台
+    find_package(ZLIB QUIET)
+  - lib/index.js：methodNames 增补 7 个方法名；loadPNG/savePNG 条件导出
+    （typeof native.loadPNG === 'function'）
+- 验证计划：npm run build → 导出存在性冒烟 → basic.test.mjs 新增 5 用例
+  （ellipse/roundRect 含半径数组、线性+径向渐变像素、clip+restore、
+  source-in 合成、PNG 编解码往返含文件落盘）→ smoke 扩展 → npm test 全绿

@@ -15,6 +15,7 @@
 NAPI_MODULE_INIT() {
     // 注意：宏展开的函数已含参数 env/exports，局部变量不可重名
     Napi::Object result = Napi::Object::New(env);
+    wbw_napi::GradientWrap::Init(env, result);
     wbw_napi::RendererWrap::Init(env, result);
     wbw_napi::ImageWrap::Init(env, result);
     return result;

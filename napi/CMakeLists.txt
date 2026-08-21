@@ -96,6 +96,29 @@ else()
     endif()
 endif()
 
+# PNG 支持：系统 zlib 探测（同根 build.ps1：Windows MinGW 自带 libz.a、
+# Linux/macOS 系统 libz）。可用 -> 定义 WBWOPENGAL_API_PNG 并链接；
+# 否则 PNG 导出（loadPNG/savePNG/toPNG）不注册，其余 API 不受影响
+if(WIN32)
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_LIBRARIES z)
+    check_cxx_source_compiles(
+        "#include <zlib.h>\nint main(){return zlibVersion()==0;}"
+        WBW_NAPI_HAVE_ZLIB)
+    unset(CMAKE_REQUIRED_LIBRARIES)
+    if(WBW_NAPI_HAVE_ZLIB)
+        target_compile_definitions(wbwopenglapi PRIVATE WBWOPENGAL_API_PNG)
+        target_link_libraries(wbwopenglapi PRIVATE z)
+    endif()
+else()
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_compile_definitions(wbwopenglapi PRIVATE WBWOPENGAL_API_PNG)
+        target_link_libraries(wbwopenglapi PRIVATE ZLIB::ZLIB)
+    endif()
+endif()
+message(STATUS "wbwopenglapi.node PNG(zlib): ${WBW_NAPI_HAVE_ZLIB}${ZLIB_FOUND}")
+
 # MinGW 下从 node_api.def 生成 node.exe 导入库（MSVC 用 lib.exe；MinGW 用 dlltool）
 if(WIN32 AND CMAKE_JS_NODELIB_DEF AND CMAKE_JS_NODELIB_TARGET)
     if(MSVC)

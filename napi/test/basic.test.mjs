@@ -1,8 +1,9 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createCanvas, loadBMP } from '../lib/index.js';
+import { createCanvas, loadBMP, loadPNG, savePNG } from '../lib/index.js';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -125,4 +126,115 @@ test('关闭后访问抛错', () => {
   const c = createCanvas(16, 16);
   c.close();
   assert.throws(() => c.clear([1, 1, 1, 1]));
+});
+
+test('ellipse 与 roundRect（含半径数组）', () => {
+  const c = createCanvas(64, 64);
+  c.clear([255, 255, 255, 255]);
+  c.fillStyle('red');
+  c.beginPath();
+  c.ellipse(16, 16, 12, 8, 0, 0, Math.PI * 2);
+  c.fill();
+  c.fillStyle('blue');
+  c.beginPath();
+  c.roundRect(36, 36, 20, 20, [6]); // 数组形式（Canvas 规范 1..4 元素）
+  c.fill();
+  c.resolve();
+  const px = c.readPixels(0, 0, 64, 64);
+  const at = (x, y) => [...px.subarray((y * 64 + x) * 4, (y * 64 + x) * 4 + 4)];
+  assert.deepEqual(at(16, 16), [255, 0, 0, 255]);     // 椭圆中心
+  assert.deepEqual(at(16, 7), [255, 0, 0, 255]);      // 椭圆短轴内 (ry=8)
+  assert.deepEqual(at(40, 40), [0, 0, 255, 255]);     // 圆角矩形内部
+  assert.deepEqual(at(37, 37), [255, 255, 255, 255]); // 圆角切掉的直角处
+  c.close();
+});
+
+test('线性/径向渐变', () => {
+  const c = createCanvas(64, 64);
+  c.clear([255, 255, 255, 255]);
+  const lg = c.createLinearGradient(0, 0, 64, 0);
+  lg.addColorStop(0, 'red');
+  lg.addColorStop(1, 'blue');
+  c.fillStyle(lg);
+  c.fillRect(0, 0, 64, 32);
+  const rg = c.createRadialGradient(32, 48, 0, 32, 48, 14);
+  rg.addColorStop(0, 'green');
+  rg.addColorStop(1, 'white');
+  c.fillStyle(rg);
+  c.fillRect(0, 32, 64, 32);
+  c.resolve();
+  const px = c.readPixels(0, 0, 64, 64);
+  const at = (x, y) => [...px.subarray((y * 64 + x) * 4, (y * 64 + x) * 4 + 4)];
+  const l0 = at(2, 8), l1 = at(61, 8), r0 = at(32, 48);
+  assert.ok(l0[0] > 200 && l0[2] < 80, '线性起点红 ' + l0);
+  assert.ok(l1[2] > 200 && l1[0] < 80, '线性终点蓝 ' + l1);
+  assert.ok(r0[1] > r0[0] + 60 && r0[1] > r0[2] + 60, '径向中心绿 ' + r0);
+  c.close();
+});
+
+test('clip 裁剪与 restore 恢复', () => {
+  const c = createCanvas(64, 64);
+  c.clear([255, 255, 255, 255]);
+  c.save();
+  c.beginPath();
+  c.rect(8, 8, 24, 24);
+  c.clip();
+  c.fillStyle('red');
+  c.fillRect(0, 0, 64, 64); // 全屏填充但被裁剪
+  c.restore();
+  c.fillStyle('lime');
+  c.fillRect(40, 40, 10, 10); // restore 后不受裁剪影响
+  c.resolve();
+  const px = c.readPixels(0, 0, 64, 64);
+  const at = (x, y) => [...px.subarray((y * 64 + x) * 4, (y * 64 + x) * 4 + 4)];
+  assert.deepEqual(at(10, 10), [255, 0, 0, 255]);     // 裁剪区内
+  assert.deepEqual(at(40, 10), [255, 255, 255, 255]); // 裁剪区外
+  assert.deepEqual(at(44, 44), [0, 255, 0, 255]);     // restore 后正常绘制
+  c.close();
+});
+
+test('globalCompositeOperation source-in', () => {
+  const c = createCanvas(32, 32);
+  c.clearRect(0, 0, 32, 32);
+  c.fillStyle('red');
+  c.fillRect(0, 0, 16, 32); // 左半红
+  c.globalCompositeOperation('source-in');
+  c.fillStyle([0, 0, 255, 255]);
+  c.fillRect(8, 0, 16, 32); // 仅在已有 alpha 内着色 -> 左半变蓝
+  c.resolve();
+  const px = c.readPixels(0, 0, 32, 32);
+  const at = (x, y) => [...px.subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4)];
+  assert.deepEqual(at(4, 16), [0, 0, 255, 255]); // dst 内：src 替换
+  assert.deepEqual(at(28, 16), [0, 0, 0, 0]);    // dst 外：透明
+  c.globalCompositeOperation('source-over');     // 未知外的合法值恢复
+  c.close();
+});
+
+test('PNG 编解码往返（toPNG/loadPNG/savePNG）', (t) => {
+  if (typeof loadPNG !== 'function' || typeof savePNG !== 'function') {
+    t.skip('构建未启用 WBWOPENGAL_API_PNG（无系统 zlib）');
+    return;
+  }
+  const c = createCanvas(48, 32);
+  c.clear([255, 255, 255, 255]);
+  c.fillStyle('#204060');
+  c.fillRect(4, 4, 20, 20);
+  c.resolve();
+  const png = c.toPNG(); // 整帧编码
+  assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const img = loadPNG(png); // Buffer 解码
+  assert.equal(img.width, c.width);
+  assert.equal(img.height, c.height);
+  const frame = c.readPixels(0, 0, c.width, c.height);
+  const off = (10 * c.width + 10) * 4;
+  assert.deepEqual([...img.rgba.subarray(off, off + 4)], [...frame.subarray(off, off + 4)]);
+  assert.equal(typeof img.toPNG, 'function');
+  assert.equal(img.toPNG()[0], 0x89);
+  const file = path.join(root, 'napi', 'test', '_png_roundtrip.png');
+  savePNG(img, file);
+  const img2 = loadPNG(file);
+  assert.equal(img2.width, img.width);
+  assert.deepEqual([...img2.rgba.subarray(off, off + 4)], [...img.rgba.subarray(off, off + 4)]);
+  fs.rmSync(file, { force: true });
+  c.close();
 });

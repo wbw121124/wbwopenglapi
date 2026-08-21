@@ -12,11 +12,12 @@ namespace wbw_napi {
 
 // env 键控的类构造函数引用集：worker_threads 下每个 env 独立持有
 // （napi_ref 绑定创建它的 env，跨 env 使用不安全）。单槽位实例数据
-// 须用一个结构体承载两个类的引用；env 销毁时 SetInstanceData 默认
+// 须用一个结构体承载全部类的引用；env 销毁时 SetInstanceData 默认
 // finalize 自动 delete。
 struct EnvRefs {
     Napi::FunctionReference renderer;
     Napi::FunctionReference image;
+    Napi::FunctionReference gradient;
 };
 
 inline EnvRefs& envRefs(Napi::Env env) {
@@ -37,8 +38,25 @@ public:
 
     Napi::Value GetWidth(const Napi::CallbackInfo& i);
     Napi::Value GetHeight(const Napi::CallbackInfo& i);
+    Napi::Value GetRgba(const Napi::CallbackInfo& i); // RGBA Buffer（拷贝）
+#ifdef WBWOPENGAL_API_PNG
+    Napi::Value ToPng(const Napi::CallbackInfo& i);
+#endif
 
     // env 键控构造函数引用（见 EnvRefs）
+    static Napi::FunctionReference& Ctor(Napi::Env env);
+};
+
+// createLinearGradient / createRadialGradient 的返回值（GradientHandle）。
+// 纯数据对象（无 GL 资源）；fillStyle/strokeStyle 接受其实例。
+class GradientWrap : public Napi::ObjectWrap<GradientWrap> {
+public:
+    static void Init(Napi::Env env, Napi::Object exports);
+    GradientWrap(const Napi::CallbackInfo& info);
+    wbwopenglapi::Gradient grad;
+
+    Napi::Value AddColorStop(const Napi::CallbackInfo& i);
+
     static Napi::FunctionReference& Ctor(Napi::Env env);
 };
 
@@ -54,6 +72,7 @@ public:
     static Napi::FunctionReference& Ctor(Napi::Env env);
 
 private:
+    friend class GradientWrap; // 复用参数解析工具（Num/ColorArg/RequireArgs）
     std::shared_ptr<Renderer> r_; // 为空 = 已 close
 
     // ---- 工具 ----
@@ -71,6 +90,8 @@ private:
     static void RequireArgs(const Napi::CallbackInfo& i, size_t n,
                             const char* name);
     static Napi::Object ToObject(const Napi::CallbackInfo& i, size_t idx);
+    // 参数是否为 GradientHandle 实例（InstanceOf 判定，避免误 Unwrap）
+    static bool IsGradient(const Napi::CallbackInfo& i, size_t idx);
 
     // ---- 方法 ----
     // 样式
@@ -86,6 +107,9 @@ private:
     Napi::Value TextBaseline(const Napi::CallbackInfo& i);
     Napi::Value FontFeatures(const Napi::CallbackInfo& i);
     Napi::Value ResetFontFeatures(const Napi::CallbackInfo& i);
+    Napi::Value GlobalCompositeOperation(const Napi::CallbackInfo& i);
+    Napi::Value CreateLinearGradient(const Napi::CallbackInfo& i);
+    Napi::Value CreateRadialGradient(const Napi::CallbackInfo& i);
     // 矩形
     Napi::Value FillRect(const Napi::CallbackInfo& i);
     Napi::Value StrokeRect(const Napi::CallbackInfo& i);
@@ -97,8 +121,11 @@ private:
     Napi::Value QuadraticCurveTo(const Napi::CallbackInfo& i);
     Napi::Value BezierCurveTo(const Napi::CallbackInfo& i);
     Napi::Value Arc(const Napi::CallbackInfo& i);
+    Napi::Value Ellipse(const Napi::CallbackInfo& i);
+    Napi::Value RoundRect(const Napi::CallbackInfo& i);
     Napi::Value Rect(const Napi::CallbackInfo& i);
     Napi::Value ClosePath(const Napi::CallbackInfo& i);
+    Napi::Value Clip(const Napi::CallbackInfo& i);
     Napi::Value Fill(const Napi::CallbackInfo& i);
     Napi::Value Stroke(const Napi::CallbackInfo& i);
     // 文本
@@ -117,11 +144,18 @@ private:
     Napi::Value Resolve(const Napi::CallbackInfo& i);
     Napi::Value ReadPixels(const Napi::CallbackInfo& i);
     Napi::Value ToBmp(const Napi::CallbackInfo& i);
+#ifdef WBWOPENGAL_API_PNG
+    Napi::Value ToPng(const Napi::CallbackInfo& i); // 整帧编码 PNG Buffer
+#endif
     Napi::Value SwapBuffers(const Napi::CallbackInfo& i);
     Napi::Value Close(const Napi::CallbackInfo& i);
 
     // 静态模块级
     static Napi::Value LoadBmp(const Napi::CallbackInfo& i);
+#ifdef WBWOPENGAL_API_PNG
+    static Napi::Value LoadPng(const Napi::CallbackInfo& i);  // 路径或 Buffer
+    static Napi::Value SavePng(const Napi::CallbackInfo& i);  // (ImageHandle, path)
+#endif
     static Napi::Value CreateCanvas(const Napi::CallbackInfo& i);
     // 属性 getter
     Napi::Value GetWidth(const Napi::CallbackInfo& i);

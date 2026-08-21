@@ -21,16 +21,24 @@ Napi::FunctionReference& RendererWrap::Ctor(Napi::Env env) {
     return envRefs(env).renderer;
 }
 
+Napi::FunctionReference& GradientWrap::Ctor(Napi::Env env) {
+    return envRefs(env).gradient;
+}
+
 // ---------------------------------------------------------------------
 // ImageWrap
 // ---------------------------------------------------------------------
 void ImageWrap::Init(Napi::Env env, Napi::Object exports) {
     // GCC 8.1 对 DefineClass 的 braced-init-list 模板推导有歧义：显式 vector；
     // InstanceAccessor 单参版须显式模板实参（非类型模板参数不可推导）
-    const std::vector<Napi::ClassPropertyDescriptor<ImageWrap>> props = {
+    std::vector<Napi::ClassPropertyDescriptor<ImageWrap>> props = {
         InstanceAccessor<&ImageWrap::GetWidth>("width"),
         InstanceAccessor<&ImageWrap::GetHeight>("height"),
+        InstanceAccessor<&ImageWrap::GetRgba>("rgba"),
     };
+#ifdef WBWOPENGAL_API_PNG
+    props.push_back(InstanceMethod("toPNG", &ImageWrap::ToPng));
+#endif
     Napi::Function func = DefineClass(env, "ImageHandle", props);
     Ctor(env) = Napi::Persistent(func);
     exports.Set("ImageHandle", func);
@@ -38,7 +46,7 @@ void ImageWrap::Init(Napi::Env env, Napi::Object exports) {
 
 ImageWrap::ImageWrap(const Napi::CallbackInfo& info)
     : Napi::ObjectWrap<ImageWrap>(info) {
-    // 仅由 loadBMP 内部构造
+    // 仅由 loadBMP/loadPNG 内部构造
 }
 
 Napi::Value ImageWrap::GetWidth(const Napi::CallbackInfo& info) {
@@ -47,6 +55,66 @@ Napi::Value ImageWrap::GetWidth(const Napi::CallbackInfo& info) {
 
 Napi::Value ImageWrap::GetHeight(const Napi::CallbackInfo& info) {
     return Napi::Number::New(info.Env(), img.height);
+}
+
+Napi::Value ImageWrap::GetRgba(const Napi::CallbackInfo& info) {
+    Napi::Buffer<unsigned char> buf =
+        Napi::Buffer<unsigned char>::New(info.Env(), img.rgba.size());
+    if (!img.rgba.empty()) {
+        std::memcpy(buf.Data(), img.rgba.data(), img.rgba.size());
+    }
+    return buf;
+}
+
+#ifdef WBWOPENGAL_API_PNG
+Napi::Value ImageWrap::ToPng(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    try {
+        const std::vector<uint8_t> png = wbwopenglapi::toPNG(img); // 失败抛异常
+        Napi::Buffer<unsigned char> buf =
+            Napi::Buffer<unsigned char>::New(env, png.size());
+        if (!png.empty()) {
+            std::memcpy(buf.Data(), png.data(), png.size());
+        }
+        return buf;
+    } catch (const std::exception& e) {
+        Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+}
+#endif
+
+// ---------------------------------------------------------------------
+// GradientWrap
+// ---------------------------------------------------------------------
+void GradientWrap::Init(Napi::Env env, Napi::Object exports) {
+    const std::vector<Napi::ClassPropertyDescriptor<GradientWrap>> props = {
+        InstanceMethod("addColorStop", &GradientWrap::AddColorStop),
+    };
+    Napi::Function func = DefineClass(env, "GradientHandle", props);
+    Ctor(env) = Napi::Persistent(func);
+    exports.Set("GradientHandle", func);
+}
+
+GradientWrap::GradientWrap(const Napi::CallbackInfo& info)
+    : Napi::ObjectWrap<GradientWrap>(info) {
+    // 仅由 createLinearGradient/createRadialGradient 内部构造
+}
+
+Napi::Value GradientWrap::AddColorStop(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    try {
+        RendererWrap::RequireArgs(info, 2, "addColorStop");
+        grad.addColorStop(RendererWrap::Num(info, 0, 0),
+                          RendererWrap::ColorArg(info, 1, wbwopenglapi::Color{0, 0, 0, 1}));
+        return env.Undefined();
+    } catch (const Napi::Error& e) {
+        e.ThrowAsJavaScriptException();
+        return env.Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -195,9 +263,21 @@ wbwopenglapi::Color RendererWrap::ColorArg(const Napi::CallbackInfo& i,
 // ---------------------------------------------------------------------
 // RendererWrap 方法
 // ---------------------------------------------------------------------
+// 参数是否为 GradientHandle 实例（InstanceOf 判定：对非本类包装对象
+// Unwrap 属未定义行为，须先判定再 Unwrap）
+bool RendererWrap::IsGradient(const Napi::CallbackInfo& i, size_t idx) {
+    if (idx >= i.Length() || !i[idx].IsObject() || i[idx].IsArray()) {
+        return false;
+    }
+    const Napi::FunctionReference& ctor = GradientWrap::Ctor(i.Env());
+    if (ctor.IsEmpty()) {
+        return false;
+    }
+    return i[idx].As<Napi::Object>().InstanceOf(ctor.Value());
+}
 Napi::Object RendererWrap::Init(Napi::Env env, Napi::Object exports) {
     // GCC 8.1 对 DefineClass 的 braced-init-list 模板推导有歧义：显式 vector
-const std::vector<Napi::ClassPropertyDescriptor<RendererWrap>> props = {
+    std::vector<Napi::ClassPropertyDescriptor<RendererWrap>> props = {
             InstanceAccessor<&RendererWrap::GetWidth>("width"),
             InstanceAccessor<&RendererWrap::GetHeight>("height"),
             // 样式
@@ -213,6 +293,9 @@ const std::vector<Napi::ClassPropertyDescriptor<RendererWrap>> props = {
             InstanceMethod("textBaseline", &RendererWrap::TextBaseline),
             InstanceMethod("fontFeatures", &RendererWrap::FontFeatures),
             InstanceMethod("resetFontFeatures", &RendererWrap::ResetFontFeatures),
+            InstanceMethod("globalCompositeOperation", &RendererWrap::GlobalCompositeOperation),
+            InstanceMethod("createLinearGradient", &RendererWrap::CreateLinearGradient),
+            InstanceMethod("createRadialGradient", &RendererWrap::CreateRadialGradient),
             // 矩形
             InstanceMethod("fillRect", &RendererWrap::FillRect),
             InstanceMethod("strokeRect", &RendererWrap::StrokeRect),
@@ -224,8 +307,11 @@ const std::vector<Napi::ClassPropertyDescriptor<RendererWrap>> props = {
             InstanceMethod("quadraticCurveTo", &RendererWrap::QuadraticCurveTo),
             InstanceMethod("bezierCurveTo", &RendererWrap::BezierCurveTo),
             InstanceMethod("arc", &RendererWrap::Arc),
+            InstanceMethod("ellipse", &RendererWrap::Ellipse),
+            InstanceMethod("roundRect", &RendererWrap::RoundRect),
             InstanceMethod("rect", &RendererWrap::Rect),
             InstanceMethod("closePath", &RendererWrap::ClosePath),
+            InstanceMethod("clip", &RendererWrap::Clip),
             InstanceMethod("fill", &RendererWrap::Fill),
             InstanceMethod("stroke", &RendererWrap::Stroke),
             // 文本
@@ -247,11 +333,18 @@ const std::vector<Napi::ClassPropertyDescriptor<RendererWrap>> props = {
             InstanceMethod("swapBuffers", &RendererWrap::SwapBuffers),
             InstanceMethod("close", &RendererWrap::Close),
     };
+#ifdef WBWOPENGAL_API_PNG
+    props.push_back(InstanceMethod("toPNG", &RendererWrap::ToPng));
+#endif
     Napi::Function func = DefineClass(env, "CanvasHandle", props);
     RendererWrap::Ctor(env) = Napi::Persistent(func);
     exports.Set("CanvasHandle", func);
     exports.Set("createCanvas", Napi::Function::New(env, CreateCanvas));
     exports.Set("loadBMP", Napi::Function::New(env, LoadBmp));
+#ifdef WBWOPENGAL_API_PNG
+    exports.Set("loadPNG", Napi::Function::New(env, LoadPng));
+    exports.Set("savePNG", Napi::Function::New(env, SavePng));
+#endif
     return exports;
 }
 
@@ -320,6 +413,59 @@ Napi::Value RendererWrap::LoadBmp(const Napi::CallbackInfo& info) {
     }
 }
 
+#ifdef WBWOPENGAL_API_PNG
+Napi::Value RendererWrap::LoadPng(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    try {
+        RequireArgs(info, 1, "loadPNG");
+        wbwopenglapi::Image img;
+        if (info[0].IsString()) {
+            img = wbwopenglapi::loadPNG(Str(info, 0, "")); // 失败抛异常
+        } else if (info[0].IsBuffer()) {
+            const Napi::Buffer<unsigned char> buf =
+                info[0].As<Napi::Buffer<unsigned char>>();
+            img = wbwopenglapi::loadPNG(buf.Data(), buf.Length());
+        } else {
+            throw Napi::TypeError::New(
+                env, "wbwopenglapi: loadPNG 参数须为路径字符串或 Buffer");
+        }
+        Napi::Object obj = ImageWrap::Ctor(env).New({Napi::String::New(env, "")});
+        ImageWrap::Unwrap(obj)->img = std::move(img);
+        return obj;
+    } catch (const Napi::Error& e) {
+        e.ThrowAsJavaScriptException();
+        return env.Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+}
+
+Napi::Value RendererWrap::SavePng(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    try {
+        RequireArgs(info, 2, "savePNG");
+        ImageWrap* w = nullptr;
+        if (info[0].IsObject() &&
+            info[0].As<Napi::Object>().InstanceOf(ImageWrap::Ctor(env).Value())) {
+            w = ImageWrap::Unwrap(info[0].As<Napi::Object>());
+        }
+        if (w == nullptr) {
+            throw Napi::TypeError::New(
+                env, "wbwopenglapi: savePNG 首个参数须为 loadBMP/loadPNG 返回的图像");
+        }
+        wbwopenglapi::savePNG(w->img, Str(info, 1, "")); // 失败抛异常
+        return env.Undefined();
+    } catch (const Napi::Error& e) {
+        e.ThrowAsJavaScriptException();
+        return env.Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+}
+#endif
+
 Napi::Value RendererWrap::GetWidth(const Napi::CallbackInfo& info) {
     try {
         Renderer& r = get();
@@ -360,7 +506,11 @@ Napi::Value RendererWrap::Clear(const Napi::CallbackInfo& info) {
 Napi::Value RendererWrap::FillStyle(const Napi::CallbackInfo& info) {
     try {
         Renderer& r = get();
-        r.ctx.fillStyle(ColorArg(info, 0, wbwopenglapi::Color{0, 0, 0, 1}));
+        if (IsGradient(info, 0)) {
+            r.ctx.fillStyle(GradientWrap::Unwrap(info[0].As<Napi::Object>())->grad);
+        } else {
+            r.ctx.fillStyle(ColorArg(info, 0, wbwopenglapi::Color{0, 0, 0, 1}));
+        }
         return info.Env().Undefined();
     } catch (const Napi::Error& e) {
         e.ThrowAsJavaScriptException();
@@ -374,7 +524,11 @@ Napi::Value RendererWrap::FillStyle(const Napi::CallbackInfo& info) {
 Napi::Value RendererWrap::StrokeStyle(const Napi::CallbackInfo& info) {
     try {
         Renderer& r = get();
-        r.ctx.strokeStyle(ColorArg(info, 0, wbwopenglapi::Color{0, 0, 0, 1}));
+        if (IsGradient(info, 0)) {
+            r.ctx.strokeStyle(GradientWrap::Unwrap(info[0].As<Napi::Object>())->grad);
+        } else {
+            r.ctx.strokeStyle(ColorArg(info, 0, wbwopenglapi::Color{0, 0, 0, 1}));
+        }
         return info.Env().Undefined();
     } catch (const Napi::Error& e) {
         e.ThrowAsJavaScriptException();
@@ -526,6 +680,61 @@ Napi::Value RendererWrap::ResetFontFeatures(const Napi::CallbackInfo& info) {
     }
 }
 
+Napi::Value RendererWrap::GlobalCompositeOperation(const Napi::CallbackInfo& info) {
+    try {
+        Renderer& r = get();
+        r.ctx.globalCompositeOperation(Str(info, 0, "source-over"));
+        return info.Env().Undefined();
+    } catch (const Napi::Error& e) {
+        e.ThrowAsJavaScriptException();
+        return info.Env().Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(info.Env(), e.what()).ThrowAsJavaScriptException();
+        return info.Env().Undefined();
+    }
+}
+
+Napi::Value RendererWrap::CreateLinearGradient(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    try {
+        RequireArgs(info, 4, "createLinearGradient");
+        Renderer& r = get();
+        const wbwopenglapi::Gradient g = r.ctx.createLinearGradient(
+            Num(info, 0, 0), Num(info, 1, 0), Num(info, 2, 0), Num(info, 3, 0));
+        Napi::Object obj = GradientWrap::Ctor(env).New({});
+        GradientWrap::Unwrap(obj)->grad = g;
+        return obj;
+    } catch (const Napi::Error& e) {
+        e.ThrowAsJavaScriptException();
+        return env.Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(env, std::string("wbwopenglapi: ") + e.what())
+            .ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+}
+
+Napi::Value RendererWrap::CreateRadialGradient(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    try {
+        RequireArgs(info, 6, "createRadialGradient");
+        Renderer& r = get();
+        const wbwopenglapi::Gradient g = r.ctx.createRadialGradient(
+            Num(info, 0, 0), Num(info, 1, 0), Num(info, 2, 0), Num(info, 3, 0),
+            Num(info, 4, 0), Num(info, 5, 0));
+        Napi::Object obj = GradientWrap::Ctor(env).New({});
+        GradientWrap::Unwrap(obj)->grad = g;
+        return obj;
+    } catch (const Napi::Error& e) {
+        e.ThrowAsJavaScriptException();
+        return env.Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(env, std::string("wbwopenglapi: ") + e.what())
+            .ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+}
+
 // ---------------- 矩形 ----------------
 
 Napi::Value RendererWrap::FillRect(const Napi::CallbackInfo& info) {
@@ -653,6 +862,76 @@ Napi::Value RendererWrap::Arc(const Napi::CallbackInfo& info) {
     }
 }
 
+Napi::Value RendererWrap::Ellipse(const Napi::CallbackInfo& info) {
+    try {
+        RequireArgs(info, 7, "ellipse");
+        get().ctx.ellipse(Num(info, 0, 0), Num(info, 1, 0), Num(info, 2, 0),
+                          Num(info, 3, 0), Num(info, 4, 0), Num(info, 5, 0),
+                          Num(info, 6, 0), Bool(info, 7, false));
+        return info.Env().Undefined();
+    } catch (const Napi::Error& e) {
+        e.ThrowAsJavaScriptException();
+        return info.Env().Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(info.Env(), e.what()).ThrowAsJavaScriptException();
+        return info.Env().Undefined();
+    }
+}
+
+// Canvas 规范 roundRect：半径为数字或 1..4 元素数组
+//   [a]            -> 四角同 a
+//   [a,b]          -> tl=br=a, tr=bl=b
+//   [a,b,c]        -> tl=a, tr=bl=b, br=c
+//   [a,b,c,d]      -> tl,tr,br,bl
+Napi::Value RendererWrap::RoundRect(const Napi::CallbackInfo& info) {
+    try {
+        RequireArgs(info, 5, "roundRect");
+        Renderer& r = get();
+        const double x = Num(info, 0, 0);
+        const double y = Num(info, 1, 0);
+        const double w = Num(info, 2, 0);
+        const double h = Num(info, 3, 0);
+        double rTL = 0, rTR = 0, rBR = 0, rBL = 0;
+        const Napi::Value v = info[4];
+        if (v.IsNumber()) {
+            rTL = rTR = rBR = rBL = v.As<Napi::Number>().DoubleValue();
+        } else if (v.IsArray()) {
+            const Napi::Array arr = v.As<Napi::Array>();
+            const uint32_t n = arr.Length();
+            if (n < 1 || n > 4) {
+                throw Napi::RangeError::New(
+                    info.Env(), "wbwopenglapi: roundRect 半径数组长度须为 1..4");
+            }
+            auto rad = [&](uint32_t k) -> double {
+                const Napi::Value e = arr.Get(k);
+                if (!e.IsNumber()) {
+                    throw Napi::TypeError::New(
+                        info.Env(), "wbwopenglapi: roundRect 半径数组元素须为数字");
+                }
+                return e.As<Napi::Number>().DoubleValue();
+            };
+            const double a = rad(0);
+            const double b = n >= 2 ? rad(1) : a;
+            const double c = n >= 3 ? rad(2) : a;
+            rTL = a;
+            rTR = b;
+            rBR = c;
+            rBL = n >= 4 ? rad(3) : b;
+        } else {
+            throw Napi::TypeError::New(
+                info.Env(), "wbwopenglapi: roundRect 半径须为数字或数组");
+        }
+        r.ctx.roundRect(x, y, w, h, rTL, rTR, rBR, rBL);
+        return info.Env().Undefined();
+    } catch (const Napi::Error& e) {
+        e.ThrowAsJavaScriptException();
+        return info.Env().Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(info.Env(), e.what()).ThrowAsJavaScriptException();
+        return info.Env().Undefined();
+    }
+}
+
 Napi::Value RendererWrap::Rect(const Napi::CallbackInfo& info) {
     try {
         get().ctx.rect(Num(info, 0, 0), Num(info, 1, 0), Num(info, 2, 0),
@@ -670,6 +949,16 @@ Napi::Value RendererWrap::Rect(const Napi::CallbackInfo& info) {
 Napi::Value RendererWrap::ClosePath(const Napi::CallbackInfo& info) {
     try {
         get().ctx.closePath();
+        return info.Env().Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(info.Env(), e.what()).ThrowAsJavaScriptException();
+        return info.Env().Undefined();
+    }
+}
+
+Napi::Value RendererWrap::Clip(const Napi::CallbackInfo& info) {
+    try {
+        get().ctx.clip();
         return info.Env().Undefined();
     } catch (const std::exception& e) {
         Napi::Error::New(info.Env(), e.what()).ThrowAsJavaScriptException();
@@ -896,6 +1185,35 @@ Napi::Value RendererWrap::ToBmp(const Napi::CallbackInfo& info) {
         return env.Undefined();
     }
 }
+
+#ifdef WBWOPENGAL_API_PNG
+Napi::Value RendererWrap::ToPng(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    try {
+        Renderer& r = get();
+        ensureResolved(r);
+        const int fw = r.win.framebufferWidth();
+        const int fh = r.win.framebufferHeight();
+        wbwopenglapi::Image img;
+        img.width = fw;
+        img.height = fh;
+        img.rgba = readRgba(fw, fh, 0, 0, fw, fh); // top-down RGBA（canvas 行序）
+        const std::vector<uint8_t> png = wbwopenglapi::toPNG(img);
+        Napi::Buffer<unsigned char> buf =
+            Napi::Buffer<unsigned char>::New(env, png.size());
+        if (!png.empty()) {
+            std::memcpy(buf.Data(), png.data(), png.size());
+        }
+        return buf;
+    } catch (const Napi::Error& e) {
+        e.ThrowAsJavaScriptException();
+        return env.Undefined();
+    } catch (const std::exception& e) {
+        Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+}
+#endif
 
 Napi::Value RendererWrap::SwapBuffers(const Napi::CallbackInfo& info) {
     try {
