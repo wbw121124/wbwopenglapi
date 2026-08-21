@@ -668,3 +668,11 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
 - 合并后观察项：push main 触发 skia-ci.yml（GN+LLVM 全链路）→ 成功后 workflow_run
   触发 debug.yml（发布包 e2e）；release/release-skia 仅 tag/dispatch 触发，
   发布闭环验证留待打 tag 时进行
+
+### 步 8/8：merge main（修改后记录，2026-08-21）——完成
+- `git merge --ff-only`：main 824c478 → 9d7773f（12 提交，18 文件 +2955/-40），
+  已推送；checkout 时工作区 6 张 test/*.bmp 为回归运行（末轮 dwrite 后端）重写的
+  快照，非代码变更意图 → 还原，main 工作区干净
+- CI 观察：push main 已触发 Skia CI（run 于 9d7773f，in_progress）；
+  前两轮同链路（11c4cb5 / 824c478）Skia CI + Debug e2e 均 success
+- 步 8/8 剩余：Skia CI / Debug e2e 转绿确认后勾结；打 tag 待发布闭环
