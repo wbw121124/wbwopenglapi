@@ -634,3 +634,17 @@ WBWOPENGAL_API_SKIA_DIR 下未找到 skia 库文件（*.lib/*.a）: D:/.../skia-
   （原 10 + 新 5：ellipse/roundRect 含半径数组、线性+径向渐变、clip+restore、
   source-in 合成、PNG 编解码往返含 Buffer 与文件落盘）
 - commit ba7a045（修改前记录 + 实现）；本条为修改后记录
+
+### 步 8/8：全量回归 + merge main（修改前记录，commit 前，2026-08-21）
+- 范围修正：原条目写「01-15 示例」，实际示例已至 20；且 01/08 实际均有 -t 模式
+  （01_hello.cpp:9 / 08_demo.cpp:9，README「01/08 无 -t」表述过时，回归以实测为准）
+- 回归矩阵：
+  1. freetype 后端（auto 默认）：build.ps1 全量编译 01-13+15-20（14_skia 跳过，
+     CI 链路验证）→ 全部 -t 运行须 exit=0
+  2. gdi 后端：全量重编译 + 全部 -t
+  3. dwrite 后端：全量重编译 + 全部 -t
+  4. freetype+HarfBuzz：10_ligature -t（连体链路）
+  5. napi：npm run build → npm run smoke → npm test（15 项）
+- 通过标准：全部 exit=0、stderr 无异常输出；随后 merge feature/canvas2d-complete
+  → main 并 push（merge 后 push main 触发 skia-ci/debug.yml 观察项）
+- 打 tag 仍按原计划延后：发布闭环（release/release-skia 全绿）后再打 tag
